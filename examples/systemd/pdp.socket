@@ -1,0 +1,14 @@
+[Unit]
+Description=PDP local workload socket
+
+[Socket]
+ListenStream=/run/pdp/pdp.sock
+SocketUser=pdp
+SocketGroup=pdp-clients
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
+Service=pdp.service
+
+[Install]
+WantedBy=sockets.target

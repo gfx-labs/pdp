@@ -26,16 +26,17 @@ const MaxSchemaBytes = 4 << 20
 
 // Relative paths are resolved against the configuration file, never cwd.
 type Config struct {
-	Version     string            `json:"version"`
-	Revision    string            `json:"revision"`
-	CAFile      string            `json:"ca_file,omitempty"`
-	Limits      Limits            `json:"limits,omitempty"`
-	Transport   Transport         `json:"transport"`
-	Identities  map[uint32]string `json:"identities"`
-	Schemas     map[string]Schema `json:"schemas,omitempty"`
-	Routes      []Route           `json:"routes"`
-	Credentials credential.Config `json:"credentials"`
-	Policy      policy.Config     `json:"policy"`
+	Version        string            `json:"version"`
+	Revision       string            `json:"revision"`
+	CAFile         string            `json:"ca_file,omitempty"`
+	Limits         Limits            `json:"limits,omitempty"`
+	Transport      Transport         `json:"transport"`
+	Identities     map[uint32]string `json:"identities"`
+	PrincipalTasks map[string]string `json:"principal_tasks,omitempty"`
+	Schemas        map[string]Schema `json:"schemas,omitempty"`
+	Routes         []Route           `json:"routes"`
+	Credentials    credential.Config `json:"credentials"`
+	Policy         policy.Config     `json:"policy"`
 }
 
 type Limits struct {
@@ -112,17 +113,28 @@ func resolve(base, path string) string {
 // decode uses JSON tags as the single public naming convention for JSON and
 // YAML. YAML duplicate keys, multiple documents and JSON unknown fields fail.
 func decode(data []byte, target any) error {
-	dec := yaml.NewDecoder(bytes.NewReader(data))
 	var raw any
-	if err := dec.Decode(&raw); err != nil {
-		return errors.New("invalid configuration syntax")
-	}
-	var extra any
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return errors.New("configuration must contain exactly one document")
-	}
-	if err := normalize(raw, 0); err != nil {
-		return err
+	if json.Valid(data) {
+		var err error
+		raw, err = schema.DecodeJSON(data)
+		if err != nil {
+			return errors.New("invalid configuration JSON")
+		}
+	} else {
+		dec := yaml.NewDecoder(bytes.NewReader(data))
+		var node yaml.Node
+		if err := dec.Decode(&node); err != nil {
+			return errors.New("invalid configuration syntax")
+		}
+		var extra yaml.Node
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			return errors.New("configuration must contain exactly one document")
+		}
+		var err error
+		raw, err = yamlValue(&node, 0)
+		if err != nil {
+			return err
+		}
 	}
 	if root, ok := raw.(map[string]any); ok {
 		for _, path := range [][]string{{"limits", "request_timeout"}, {"credentials", "limits", "timeout"}, {"credentials", "limits", "expiry_margin"}, {"policy", "relationships", "max_age"}} {
@@ -137,32 +149,78 @@ func decode(data []byte, target any) error {
 	}
 	jd := json.NewDecoder(bytes.NewReader(b))
 	jd.DisallowUnknownFields()
+	jd.UseNumber()
 	if err := jd.Decode(target); err != nil {
 		return errors.New("invalid configuration field or value")
 	}
 	return nil
 }
 
-// Duration strings are accepted only for fields that have duration semantics.
-func normalize(value any, depth int) error {
+// Numeric lexemes pass through JSON's exact-number parser, never float64.
+// YAML aliases, merges and non-string keys have no configuration semantics.
+func yamlValue(node *yaml.Node, depth int) (any, error) {
 	if depth > 64 {
-		return errors.New("configuration nesting exceeds limit")
+		return nil, errors.New("configuration nesting exceeds limit")
 	}
-	switch v := value.(type) {
-	case map[string]any:
-		for _, item := range v {
-			if err := normalize(item, depth+1); err != nil {
-				return err
-			}
+	switch node.Kind {
+	case yaml.DocumentNode:
+		if len(node.Content) != 1 {
+			return nil, errors.New("empty configuration")
 		}
-	case []any:
-		for _, item := range v {
-			if err := normalize(item, depth+1); err != nil {
-				return err
+		return yamlValue(node.Content[0], depth)
+	case yaml.MappingNode:
+		out := map[string]any{}
+		for i := 0; i < len(node.Content); i += 2 {
+			key := node.Content[i]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+				return nil, errors.New("configuration keys must be strings, quote numeric UIDs")
 			}
+			if _, exists := out[key.Value]; exists {
+				return nil, errors.New("duplicate configuration key")
+			}
+			value, err := yamlValue(node.Content[i+1], depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[key.Value] = value
+		}
+		return out, nil
+	case yaml.SequenceNode:
+		out := make([]any, 0, len(node.Content))
+		for _, child := range node.Content {
+			value, err := yamlValue(child, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, value)
+		}
+		return out, nil
+	case yaml.ScalarNode:
+		switch node.Tag {
+		case "!!str", "!!timestamp":
+			return node.Value, nil
+		case "!!null":
+			if node.Value == "" || node.Value == "~" || strings.EqualFold(node.Value, "null") {
+				return nil, nil
+			}
+		case "!!bool":
+			if strings.EqualFold(node.Value, "true") {
+				return true, nil
+			}
+			if strings.EqualFold(node.Value, "false") {
+				return false, nil
+			}
+		case "!!int", "!!float":
+			value, err := schema.DecodeJSON([]byte(node.Value))
+			if err == nil {
+				if number, ok := value.(json.Number); ok {
+					return number, nil
+				}
+			}
+			return nil, errors.New("configuration numbers must use finite JSON numeric notation")
 		}
 	}
-	return nil
+	return nil, errors.New("unsupported YAML alias, merge or tag")
 }
 
 func normalizeDuration(root map[string]any, path []string) error {
@@ -269,11 +327,20 @@ func Load(ctx context.Context, path string) (_ *Loaded, err error) {
 			}
 		}
 	}
+	addProfiles(&c, l.Catalogs)
+	if err = validateReferences(&c, l.Catalogs); err != nil {
+		return nil, err
+	}
 	c.Policy.Revision = c.Revision
 	l.Config = c
 	l.Policy, err = policy.New(ctx, c.Policy)
 	if err != nil {
 		return nil, errors.New("invalid authorization policy")
+	}
+	for _, d := range l.Policy.Diagnostics() {
+		if d.Code == "unknown_operation_reference" {
+			return nil, errors.New("policy references an unknown operation")
+		}
 	}
 	l.Credentials, err = credential.New(c.Credentials)
 	if err != nil {

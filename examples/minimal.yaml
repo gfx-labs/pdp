@@ -1,0 +1,32 @@
+# Minimal full access. Replace UID 1000 and the mounted credential path.
+# This example does not read the secret until a request is authorized.
+version: pdp.config/v1
+revision: minimal-v1
+transport:
+  unix_socket: /run/pdp/pdp.sock
+  socket_mode: "0600"
+identities:
+  "1000": local-worker
+routes:
+  - provider: github
+    binding: github-local
+credentials:
+  providers:
+    github:
+      script: |
+        def acquire(request):
+            return static(secret("token"))
+  bindings:
+    github-local:
+      provider: github
+      secrets:
+        token:
+          file: /run/secrets/github-token
+policy:
+  grants:
+    - id: local-github-full
+      mode: full
+      scope:
+        identities: [local-worker]
+        providers: [github]
+        bindings: [github-local]

@@ -72,7 +72,7 @@ func snapshot(l *config.Loaded, a auth.Authenticator) (*gateway.Snapshot, error)
 	for _, r := range l.Config.Routes {
 		routes = append(routes, gateway.Route{Provider: r.Provider, Binding: r.Binding, UpstreamURL: r.UpstreamURL, Scopes: r.Scopes, REST: l.REST[r.Schema], GraphQL: l.GraphQL[r.Schema]})
 	}
-	return gateway.NewSnapshot(gateway.SnapshotConfig{Version: l.Config.Revision, Authenticator: a, Routes: routes, Policy: l.Policy, Credentials: l.Credentials})
+	return gateway.NewSnapshot(gateway.SnapshotConfig{Version: l.Config.Revision, Authenticator: a, Routes: routes, Policy: l.Policy, Credentials: l.Credentials, PrincipalTasks: l.Config.PrincipalTasks})
 }
 
 func gatewayOptions(l *config.Loaded) gateway.Options {

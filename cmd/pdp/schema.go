@@ -11,7 +11,7 @@ import (
 	"github.com/gfx-labs/pdp/internal/schema"
 )
 
-const maxSchemaBytes = 16 << 20
+const maxSchemaBytes = schema.MaxDocumentBytes
 
 func readLimited(path string, max int64) ([]byte, error) {
 	f, err := os.Open(path)
@@ -94,5 +94,25 @@ func schemaCommand(args []string, out, errout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("after schema: %w", err)
 	}
-	return printJSON(out, schema.Diff(before, after))
+	changes := schema.Diff(before, after)
+	type operationChange struct {
+		Before schema.Operation `json:"before"`
+		After  schema.Operation `json:"after"`
+	}
+	result := struct {
+		schema.Changes
+		ChangedOperations []operationChange `json:"changed_operations"`
+	}{Changes: changes, ChangedOperations: []operationChange{}}
+	oldOperations := make(map[string]schema.Operation, len(before.Operations))
+	newOperations := make(map[string]schema.Operation, len(after.Operations))
+	for _, op := range before.Operations {
+		oldOperations[op.ID] = op
+	}
+	for _, op := range after.Operations {
+		newOperations[op.ID] = op
+	}
+	for _, id := range changes.Changed {
+		result.ChangedOperations = append(result.ChangedOperations, operationChange{Before: oldOperations[id], After: newOperations[id]})
+	}
+	return printJSON(out, result)
 }

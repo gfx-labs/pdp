@@ -65,7 +65,7 @@ func requestCommand(args []string, out, errout io.Writer) error {
 	fs.SetOutput(errout)
 	socket := fs.String("socket", "/run/pdp/pdp.sock", "Unix gateway socket")
 	method := fs.String("method", "GET", "HTTP method")
-	path := fs.String("path", "", "gateway path including provider and binding")
+	path := fs.String("path", "", "gateway path, for example /upstreams/github/repos/owner/repo")
 	bodyFile := fs.String("body", "", "request body file, or - for stdin")
 	contentType := fs.String("content-type", "application/json", "request content type")
 	timeout := fs.Duration("timeout", 30*time.Second, "request timeout")
@@ -73,7 +73,7 @@ func requestCommand(args []string, out, errout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 0 || *path == "" || *timeout <= 0 {
-		return errors.New("usage: pdp request --socket PATH --path /PROVIDER/BINDING/PATH [--method GET] [--body FILE]")
+		return errors.New("usage: pdp request --socket PATH --path /upstreams/PROVIDER/PATH [--method GET] [--body FILE]")
 	}
 	u, err := url.ParseRequestURI(*path)
 	if err != nil || !strings.HasPrefix(*path, "/") || strings.HasPrefix(*path, "//") || u.Host != "" || u.Scheme != "" {
@@ -111,8 +111,9 @@ func requestCommand(args []string, out, errout io.Writer) error {
 		return errors.New("gateway request failed")
 	}
 	defer resp.Body.Close()
-	if _, err := io.Copy(out, io.LimitReader(resp.Body, (16<<20)+1)); err != nil {
-		return errors.New("cannot read gateway response")
+	n, err := io.Copy(out, io.LimitReader(resp.Body, (32<<20)+1))
+	if err != nil || n > 32<<20 {
+		return errors.New("gateway response is unreadable or exceeds 32 MiB")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("gateway returned HTTP %d", resp.StatusCode)

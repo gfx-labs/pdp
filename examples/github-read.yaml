@@ -1,0 +1,38 @@
+# Read-only provider surface, one fully qualified GitHub repository.
+version: pdp.config/v1
+revision: github-read-v1
+transport:
+  unix_socket: /run/pdp/pdp.sock
+  socket_mode: "0600"
+identities:
+  "1000": local-worker
+schemas:
+  github:
+    protocol: rest
+    file: ../internal/schema/testdata/github-rest.json
+routes:
+  - provider: github
+    binding: github-repo
+    schema: github
+credentials:
+  providers:
+    github:
+      script: |
+        def acquire(request):
+            return static(secret("token"))
+  bindings:
+    github-repo:
+      provider: github
+      secrets:
+        token:
+          file: /run/secrets/github-token
+policy:
+  grants:
+    - id: approved-repository-read
+      mode: read
+      scope:
+        identities: [local-worker]
+        providers: [github]
+        bindings: [github-repo]
+      constraints:
+        repositories: [APPROVED_OWNER/APPROVED_REPOSITORY]

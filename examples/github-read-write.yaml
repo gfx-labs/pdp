@@ -1,0 +1,47 @@
+# Replace all administrator IDs and repository names before serving.
+# In this pinned schema, read_write adds only issues/create-comment to reads.
+version: pdp.config/v1
+revision: github-read-write-v1
+transport:
+  unix_socket: /run/pdp/pdp.sock
+  socket_mode: "0600"
+identities:
+  "1000": local-worker
+schemas:
+  github:
+    protocol: rest
+    file: ../internal/schema/testdata/github-rest.json
+routes:
+  - provider: github
+    binding: github-app-repo
+    schema: github
+credentials:
+  providers:
+    github:
+      script: |
+        def acquire(request):
+            return github_installation("token", secret("private_key"))
+      endpoints:
+        token: https://api.github.com/app/installations/REPLACE_INSTALLATION_ID/access_tokens
+  bindings:
+    github-app-repo:
+      provider: github
+      secrets:
+        private_key:
+          file: /run/secrets/github-app.pem
+      github:
+        app_id: REPLACE_APP_ID
+        repository_ids: [123456789]
+        permissions:
+          contents: read
+          issues: write
+policy:
+  grants:
+    - id: approved-repository-read-comment
+      mode: read_write
+      scope:
+        identities: [local-worker]
+        providers: [github]
+        bindings: [github-app-repo]
+      constraints:
+        repositories: [APPROVED_OWNER/APPROVED_REPOSITORY]

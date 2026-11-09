@@ -183,7 +183,11 @@ func serveCommand(args []string, out, errout io.Writer) error {
 				logger.Print(`{"event":"reload_rejected","reason":"invalid_configuration"}`)
 				continue
 			}
-			if err = validateTransport(next.Config); err != nil || !sameRuntime(l.Config, next.Config) || next.Config.Revision == l.Config.Revision {
+			trustChanged := (l.RootCAs == nil) != (next.RootCAs == nil)
+			if l.RootCAs != nil && next.RootCAs != nil && !l.RootCAs.Equal(next.RootCAs) {
+				trustChanged = true
+			}
+			if err = validateTransport(next.Config); err != nil || !sameRuntime(l.Config, next.Config) || trustChanged || next.Config.Revision == l.Config.Revision {
 				next.Close()
 				logger.Print(`{"event":"reload_rejected","reason":"invalid_transport_or_revision"}`)
 				continue
@@ -206,7 +210,11 @@ func serveCommand(args []string, out, errout io.Writer) error {
 				continue
 			}
 			l = next
-			logger.Print(`{"event":"reload_applied"}`)
+			ack, _ := json.Marshal(struct {
+				Event    string `json:"event"`
+				Revision string `json:"revision"`
+			}{"reload_applied", next.Config.Revision})
+			logger.Print(string(ack))
 		}
 	}
 }
