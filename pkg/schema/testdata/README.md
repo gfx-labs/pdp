@@ -29,8 +29,8 @@ From the repository root, with a scratch directory:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/github/rest-api-description/2f8f80e47ea4d3292cf4e37ba9d9b25475e06140/descriptions/api.github.com/api.github.com.json -o "$JCODE_SCRATCH_DIR/github-openapi.json"
 curl -fsSL https://raw.githubusercontent.com/linear/linear/9ba7b299eb5fb0036d14d2e8299e18e7c4bd13e3/packages/sdk/src/schema.graphql -o "$JCODE_SCRATCH_DIR/linear-original.graphql"
-go run internal/schema/testdata/generate.go "$JCODE_SCRATCH_DIR/github-openapi.json" "$JCODE_SCRATCH_DIR/linear-original.graphql"
-go test -race ./internal/schema
+go run pkg/schema/testdata/generate.go "$JCODE_SCRATCH_DIR/github-openapi.json" "$JCODE_SCRATCH_DIR/linear-original.graphql"
+go test -race ./pkg/schema
 ```
 
 Schema membership is not an authorization grant. In particular, actual Linear `CommentCreateInput.body` and `issueId` are optional, and alternative targets exist. A restricted comment policy must require its approved issue ID and body and deny alternative target fields. A team ID supplied in a comment is not proof of issue membership.

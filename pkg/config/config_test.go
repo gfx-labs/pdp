@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gfx-labs/pdp/internal/policy"
+	"github.com/gfx-labs/pdp/pkg/policy"
 )
 
 // This boundary owns configuration precision and preventing a removed schema

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gfx-labs/pdp/internal/schema"
+	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
 // These requests are normalized locally. No provider requests are sent.

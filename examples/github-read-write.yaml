@@ -10,7 +10,7 @@ identities:
 schemas:
   github:
     protocol: rest
-    file: ../internal/schema/testdata/github-rest.json
+    file: ../pkg/schema/testdata/github-rest.json
 routes:
   - provider: github
     binding: github-app-repo

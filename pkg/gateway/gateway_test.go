@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gfx-labs/pdp/internal/auth"
-	"github.com/gfx-labs/pdp/internal/credential"
-	"github.com/gfx-labs/pdp/internal/policy"
-	"github.com/gfx-labs/pdp/internal/schema"
+	"github.com/gfx-labs/pdp/pkg/auth"
+	"github.com/gfx-labs/pdp/pkg/credential"
+	"github.com/gfx-labs/pdp/pkg/policy"
+	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
 const testToken = "pdp-test-provider-secret-7b35ef91"

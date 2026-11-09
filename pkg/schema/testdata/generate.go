@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) != 3 {
-		panic("usage: go run internal/schema/testdata/generate.go GITHUB_JSON LINEAR_SDL")
+		panic("usage: go run pkg/schema/testdata/generate.go GITHUB_JSON LINEAR_SDL")
 	}
 	generateGitHub(os.Args[1])
 	generateLinear(os.Args[2])
@@ -87,7 +87,7 @@ func generateGitHub(path string) {
 	projected := map[string]any{"openapi": source["openapi"], "info": map[string]any{"title": "GitHub restricted request projection", "version": "2f8f80e47ea4d3292cf4e37ba9d9b25475e06140"}, "paths": paths}
 	data, err = json.MarshalIndent(projected, "", "  ")
 	must(err)
-	must(os.WriteFile("internal/schema/testdata/github-rest.json", append(data, '\n'), 0644))
+	must(os.WriteFile("pkg/schema/testdata/github-rest.json", append(data, '\n'), 0644))
 }
 func generateLinear(path string) {
 	data := readPinned(path, "dc0f838785760f8daa692e438fcd15071c5bc39c6997758d5c2d303364f98e56")
@@ -112,7 +112,7 @@ func generateLinear(path string) {
 			out.Definitions = append(out.Definitions, def)
 		}
 	}
-	f, err := os.Create("internal/schema/testdata/linear.graphql")
+	f, err := os.Create("pkg/schema/testdata/linear.graphql")
 	must(err)
 	formatter.NewFormatter(f).FormatSchemaDocument(out)
 	must(f.Close())

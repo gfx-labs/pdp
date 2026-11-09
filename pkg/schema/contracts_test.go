@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gfx-labs/pdp/internal/schema"
+	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
 func catalogContract(t *testing.T, catalog schema.Catalog, id string) map[string]any {

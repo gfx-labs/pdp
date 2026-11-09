@@ -22,14 +22,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gfx-labs/pdp/internal/config"
-	"github.com/gfx-labs/pdp/internal/credential"
-	"github.com/gfx-labs/pdp/internal/policy"
-	"github.com/gfx-labs/pdp/internal/schema"
+	"github.com/gfx-labs/pdp/pkg/config"
+	"github.com/gfx-labs/pdp/pkg/credential"
+	"github.com/gfx-labs/pdp/pkg/policy"
+	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
 func TestCLISchemaDiff(t *testing.T) {
-	before := "../../internal/schema/testdata/github-rest.json"
+	before := "../../pkg/schema/testdata/github-rest.json"
 	data, err := os.ReadFile(before)
 	if err != nil {
 		t.Fatal(err)

@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/gfx-labs/pdp/internal/schema"
+	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
 const maxSchemaBytes = schema.MaxDocumentBytes

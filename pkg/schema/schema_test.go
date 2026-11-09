@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gfx-labs/pdp/internal/schema"
+	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
 func publicSDL(t *testing.T) []byte {

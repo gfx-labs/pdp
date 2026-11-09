@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gfx-labs/pdp/internal/policy"
+	"github.com/gfx-labs/pdp/pkg/policy"
 )
 
 func scope() policy.Scope {

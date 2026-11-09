@@ -39,8 +39,8 @@ Each grant's constraints are conjunctive. Multiple grants are additive. A narrow
 ```sh
 ./pdp validate --config /etc/pdp/pdp.yaml
 ./pdp explain --config examples/minimal.yaml --input examples/explain-full.json
-./pdp catalog --protocol rest --schema internal/schema/testdata/github-rest.json
-./pdp catalog --protocol graphql --schema internal/schema/testdata/linear.graphql
+./pdp catalog --protocol rest --schema pkg/schema/testdata/github-rest.json
+./pdp catalog --protocol graphql --schema pkg/schema/testdata/linear.graphql
 ./pdp schema diff --protocol rest before.json after.json
 ./pdp request --socket /run/pdp/pdp.sock --method POST \
   --path /upstreams/linear/graphql --body query.json

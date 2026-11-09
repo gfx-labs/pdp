@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gfx-labs/pdp/internal/auth"
-	"github.com/gfx-labs/pdp/internal/config"
-	"github.com/gfx-labs/pdp/internal/gateway"
+	"github.com/gfx-labs/pdp/pkg/auth"
+	"github.com/gfx-labs/pdp/pkg/config"
+	"github.com/gfx-labs/pdp/pkg/gateway"
 )
 
 func runtimeAuth(c config.Config, source *auth.SPIFFE) (auth.Authenticator, error) {

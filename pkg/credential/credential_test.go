@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gfx-labs/pdp/internal/credential"
-	"github.com/gfx-labs/pdp/internal/credential/adapters"
+	"github.com/gfx-labs/pdp/pkg/credential"
+	"github.com/gfx-labs/pdp/pkg/credential/adapters"
 )
 
 func secretFile(t *testing.T, dir, name, value string) string {

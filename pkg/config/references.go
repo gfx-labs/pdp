@@ -4,8 +4,8 @@ import (
 	"errors"
 	"reflect"
 
-	"github.com/gfx-labs/pdp/internal/policy"
-	"github.com/gfx-labs/pdp/internal/schema"
+	"github.com/gfx-labs/pdp/pkg/policy"
+	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
 func member(values []string, wanted string) bool {

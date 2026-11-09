@@ -1,15 +1,15 @@
 package config
 
 import (
-	"github.com/gfx-labs/pdp/internal/policy"
-	"github.com/gfx-labs/pdp/internal/schema"
+	"github.com/gfx-labs/pdp/pkg/policy"
+	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
 const reviewedGitHubDigest = "sha256:e5144f87c069a92de5d96588a6b4b4c8614f1f88c9f52b012a7dd63704a0ca89"
 const reviewedLinearDigest = "sha256:45be35e9a86ff65c6558a58ea67eebd69d2ee75166b0f4da1385aa5b856aec68"
 
 // Reviewed mappings are an explicit finite set pinned to the reviewed provider
-// projections in internal/schema/testdata. Updating a projection requires review
+// projections in pkg/schema/testdata. Updating a projection requires review
 // of this digest, not automatic approval of its newly imported catalog.
 func addProfiles(c *Config, catalogs map[string]schema.Catalog) {
 	github := map[string]policy.Classification{

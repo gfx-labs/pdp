@@ -12,7 +12,7 @@ Validation reads and compiles source/schema files but does not fetch a token, op
 
 ## Exact built-in profiles
 
-The finite reviewed map is `internal/config/profiles.go`. Built-ins are enabled only for the exact reviewed provider-projection digests pinned there, not merely a matching operation ID. A changed method, path, argument type or schema metadata cannot silently retain approval on reload. Updating those pins requires review. An explicit administrator `policy.operations` entry overrides a built-in entry and must supply its nonempty exact reviewed `schema_digest` and `reviewed: true` for restricted access. New schema operations never become readable or writable automatically. A restricted profile with no reviewed operations rejects loading.
+The finite reviewed map is `pkg/config/profiles.go`. Built-ins are enabled only for the exact reviewed provider-projection digests pinned there, not merely a matching operation ID. A changed method, path, argument type or schema metadata cannot silently retain approval on reload. Updating those pins requires review. An explicit administrator `policy.operations` entry overrides a built-in entry and must supply its nonempty exact reviewed `schema_digest` and `reviewed: true` for restricted access. New schema operations never become readable or writable automatically. A restricted profile with no reviewed operations rejects loading.
 
 | Provider | Read operations/field coordinates | Additional `read_write` operation |
 | --- | --- | --- |
@@ -25,7 +25,7 @@ Linear `Query.issue(id:)` and `Mutation.commentCreate(input.issueId:)` identify 
 
 All restricted profiles and typed operation/resource restrictions require a schema. A schema-free route accepts only unrestricted `full` grants and untyped global restrictions. Removing a schema cannot silently disable a typed deny. Unknown policy operation/GraphQL-field references and mismatched pinned schema digests reject the snapshot. Unknown literal operation comparisons diagnosed in custom Rego reject loading. Arbitrary dynamic Rego expressions cannot be exhaustively statically checked. Custom modules use `package pdp.custom`, with `deny` a set of strings. They can only add denials, not replace the base allow decision. Network/runtime introspection builtins are excluded.
 
-See `examples/github-read.yaml`, `examples/github-read-write.yaml` and `examples/linear-read-write.yaml`. Their IDs and secret paths are templates. The schema files are curated supported request projections from pinned real provider sources with provenance under `internal/schema/testdata`. They are not complete provider schemas or response filters.
+See `examples/github-read.yaml`, `examples/github-read-write.yaml` and `examples/linear-read-write.yaml`. Their IDs and secret paths are templates. The schema files are curated supported request projections from pinned real provider sources with provenance under `pkg/schema/testdata`. They are not complete provider schemas or response filters.
 
 ## Supported schema surface
 

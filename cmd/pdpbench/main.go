@@ -28,9 +28,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gfx-labs/pdp/internal/config"
-	"github.com/gfx-labs/pdp/internal/credential"
-	"github.com/gfx-labs/pdp/internal/policy"
+	"github.com/gfx-labs/pdp/pkg/config"
+	"github.com/gfx-labs/pdp/pkg/credential"
+	"github.com/gfx-labs/pdp/pkg/policy"
 )
 
 type usage struct {

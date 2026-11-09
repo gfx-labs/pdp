@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gfx-labs/pdp/internal/credential"
-	"github.com/gfx-labs/pdp/internal/policy"
-	"github.com/gfx-labs/pdp/internal/schema"
+	"github.com/gfx-labs/pdp/pkg/credential"
+	"github.com/gfx-labs/pdp/pkg/policy"
+	"github.com/gfx-labs/pdp/pkg/schema"
 	"go.yaml.in/yaml/v3"
 )
 

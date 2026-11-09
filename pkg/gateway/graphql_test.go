@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/gfx-labs/pdp/internal/auth"
-	"github.com/gfx-labs/pdp/internal/config"
-	"github.com/gfx-labs/pdp/internal/credential"
-	"github.com/gfx-labs/pdp/internal/policy"
+	"github.com/gfx-labs/pdp/pkg/auth"
+	"github.com/gfx-labs/pdp/pkg/config"
+	"github.com/gfx-labs/pdp/pkg/credential"
+	"github.com/gfx-labs/pdp/pkg/policy"
 )
 
 // The real config loader supplies the pinned, reviewed Linear mapping. No test

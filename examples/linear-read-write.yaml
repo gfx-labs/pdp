@@ -9,7 +9,7 @@ identities:
 schemas:
   linear:
     protocol: graphql
-    file: ../internal/schema/testdata/linear.graphql
+    file: ../pkg/schema/testdata/linear.graphql
 routes:
   - provider: linear
     binding: linear-app
