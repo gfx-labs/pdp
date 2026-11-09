@@ -165,6 +165,8 @@ func TestUnixTLSForward(t *testing.T) {
 		w.Header().Set("WWW-Authenticate", testToken)
 		w.Header().Set("X-Debug", testToken)
 		w.Header().Set("Location", "https://evil.invalid/"+testToken)
+		w.Header().Set("Connection", "X-Ratelimit-Remaining")
+		w.Header().Set("X-RateLimit-Remaining", "7")
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}, true, Options{})
 	headers := http.Header{"Authorization": {"Bearer caller"}, "Cookie": {"caller-secret"}, "X-Principal": {"root"}, "X-Api-Key": {"caller-key"}, "Proxy-Authorization": {"caller-proxy"}, "X-Forwarded-For": {"untrusted"}, "Connection": {"X-Custom-Hop"}, "X-Custom-Hop": {"untrusted"}}
@@ -179,6 +181,9 @@ func TestUnixTLSForward(t *testing.T) {
 	}
 	if response.Get("Set-Cookie") != "" || response.Get("Location") != "" || response.Get("WWW-Authenticate") != "" {
 		t.Fatal("sensitive response headers forwarded")
+	}
+	if response.Get("X-RateLimit-Remaining") != "" {
+		t.Fatal("connection-nominated response header forwarded")
 	}
 	h.eventsMu.Lock()
 	audit, _ := json.Marshal(h.events)
@@ -306,15 +311,24 @@ func TestResponseBoundary(t *testing.T) {
 		case "/error":
 			w.WriteHeader(400)
 			_, _ = fmt.Fprintf(w, `{"error":%q}`, r.Header.Get("Authorization"))
+		case "/safe-error":
+			w.WriteHeader(400)
+			_, _ = io.WriteString(w, `{"errors":[{"message":"invalid field"}]}`)
 		case "/reflect":
 			_, _ = fmt.Fprintf(w, `{"debug":%q}`, r.Header.Get("Authorization"))
-		case "/escaped":
+		case "/escaped", "/escaped-error":
+			if r.URL.Path == "/escaped-error" {
+				w.WriteHeader(400)
+			}
 			_, _ = io.WriteString(w, `{"debug":"`+strings.ReplaceAll(testToken, "p", `\u0070`)+`"}`)
-		case "/malformed":
+		case "/malformed", "/malformed-error":
+			if r.URL.Path == "/malformed-error" {
+				w.WriteHeader(400)
+			}
 			_, _ = io.WriteString(w, `not-json {"debug":"`+strings.ReplaceAll(testToken, "p", `\u0070`)+`"}`)
 		}
 	}, true, Options{MaxResponseBytes: 256})
-	for _, path := range []string{"redirect", "large", "stream", "compressed", "reflect", "escaped", "malformed"} {
+	for _, path := range []string{"redirect", "large", "stream", "compressed", "reflect", "escaped", "malformed", "error", "escaped-error", "malformed-error"} {
 		t.Run(path, func(t *testing.T) {
 			status, headers, body := h.request(t, "GET", "/upstreams/github/"+path, "", http.Header{})
 			if status != 502 || strings.Contains(body, testToken) || headers.Get("Location") != "" {
@@ -322,9 +336,9 @@ func TestResponseBoundary(t *testing.T) {
 			}
 		})
 	}
-	status, _, body := h.request(t, "GET", "/upstreams/github/error", "", http.Header{})
-	if status != 400 || strings.Contains(body, testToken) || strings.Contains(body, "Bearer") {
-		t.Fatalf("upstream error leaked: %d %s", status, body)
+	status, _, body := h.request(t, "GET", "/upstreams/github/safe-error", "", http.Header{})
+	if status != 400 || body != `{"errors":[{"message":"invalid field"}]}` {
+		t.Fatalf("safe provider error changed: %d %s", status, body)
 	}
 	if targetCalls.Load() != 0 {
 		t.Fatal("redirect followed")

@@ -195,11 +195,12 @@ type AuditEvent struct {
 }
 
 type Metrics struct {
-	Requests uint64 `json:"requests"`
-	Allowed  uint64 `json:"allowed"`
-	Denied   uint64 `json:"denied"`
-	Failed   uint64 `json:"failed"`
-	InFlight int64  `json:"in_flight"`
+	Requests    uint64           `json:"requests"`
+	Allowed     uint64           `json:"allowed"`
+	Denied      uint64           `json:"denied"`
+	Failed      uint64           `json:"failed"`
+	InFlight    int64            `json:"in_flight"`
+	Credentials credential.Stats `json:"credentials"`
 }
 
 type Gateway struct {
@@ -280,7 +281,11 @@ func (g *Gateway) Reload(s *Snapshot) error {
 	return nil
 }
 func (g *Gateway) Metrics() Metrics {
-	return Metrics{Requests: g.requests.Load(), Allowed: g.allowed.Load(), Denied: g.denied.Load(), Failed: g.failed.Load(), InFlight: g.inflight.Load()}
+	metrics := Metrics{Requests: g.requests.Load(), Allowed: g.allowed.Load(), Denied: g.denied.Load(), Failed: g.failed.Load(), InFlight: g.inflight.Load()}
+	if snapshot := g.current.Load(); snapshot != nil {
+		metrics.Credentials = snapshot.credentials.Stats()
+	}
+	return metrics
 }
 func (g *Gateway) Close() {
 	g.reloadMu.Lock()
@@ -467,23 +472,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadGateway, "invalid_upstream_response")
 		return
 	}
-	if response.StatusCode >= 400 {
-		// Provider error bodies can contain credentials or reflected request values.
-		data = []byte("{\"error\":\"upstream_rejected\"}\n")
-		w.Header().Set("Content-Type", "application/json")
-	}
 	if lease.ContainsSecret(data) {
 		fail(http.StatusBadGateway, "invalid_upstream_response")
 		return
 	}
-	copyResponseHeaders(w.Header(), response.Header)
-	for name, values := range w.Header() {
-		for _, value := range values {
-			if lease.ContainsSecret([]byte(value)) {
-				w.Header().Del(name)
-				break
-			}
-		}
+	// Go's transport removes Connection: close before exposing response headers,
+	// so reconstruct locally rather than retain hidden connection-nominated fields.
+	if len(data) > 0 {
+		w.Header().Set("Content-Type", "application/json")
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

@@ -10,7 +10,6 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -327,7 +326,7 @@ func newUpstreamRequest(ctx context.Context, in *http.Request, target *url.URL, 
 }
 
 func readResponse(r *http.Response, o Options) ([]byte, error) {
-	if r.StatusCode < 200 || r.StatusCode >= 300 && r.StatusCode < 400 || r.StatusCode == 101 || len(r.Trailer) != 0 || r.Header.Get("Trailer") != "" || r.Header.Get("Upgrade") != "" || r.Header.Get("Content-Encoding") != "" {
+	if r.StatusCode < 200 || r.StatusCode >= 600 || r.StatusCode >= 300 && r.StatusCode < 400 || r.StatusCode == 101 || len(r.Trailer) != 0 || r.Header.Get("Trailer") != "" || r.Header.Get("Upgrade") != "" || r.Header.Get("Content-Encoding") != "" {
 		return nil, errRequest
 	}
 	if len(r.Header.Values("Content-Type")) > 1 {
@@ -351,27 +350,12 @@ func readResponse(r *http.Response, o Options) ([]byte, error) {
 	if err != nil || int64(len(data)) > o.MaxResponseBytes || len(r.Trailer) != 0 {
 		return nil, errRequest
 	}
-	if r.StatusCode < 400 && len(data) > 0 {
+	if len(data) > 0 {
 		if _, err := schema.DecodeJSON(data); err != nil {
 			return nil, errRequest
 		}
 	}
 	return data, nil
-}
-
-func copyResponseHeaders(dst, src http.Header) {
-	if src.Get("Content-Type") != "" {
-		dst.Set("Content-Type", "application/json")
-	}
-	// Cookies, Location, auth challenges, Link, debug and server headers are omitted.
-	for _, name := range []string{"X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After"} {
-		value := src.Get(name)
-		if value != "" {
-			if n, err := strconv.ParseUint(value, 10, 64); err == nil {
-				dst.Set(name, strconv.FormatUint(n, 10))
-			}
-		}
-	}
 }
 
 func writeError(w http.ResponseWriter, status int, code string) {
