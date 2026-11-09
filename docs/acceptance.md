@@ -109,4 +109,29 @@ For systemd, install the reviewed units only with approval, verify socket group 
 
 ## Resource measurements
 
-Record binary version, Go version, selected schema/policy sizes, request mix, concurrency and hardware. Measure gateway idle RSS/CPU, warm authorized-request latency, acquisition/refresh latency and active memory separately. Use the sanitized credential acquisition counters and gateway counters to distinguish cached requests from refreshes. Measure SPIRE server and agent separately when actually deployed. Do not infer complete deployment cost from the gateway's idle process, nor claim a local synthetic refresh is provider-network latency. The coordinator's measured results, when available, must name the exact tested boundary and external gaps.
+Measured on November 9, 2026 with Go 1.27.3 on Linux x86_64, Intel Core i9-14900. Reproduce with:
+
+```sh
+make build
+go run ./cmd/pdpbench -pdp ./bin/pdp -requests 1000 -concurrency 4
+```
+
+The harness starts the actual daemon with kernel UID authentication, one schema-free full grant, embedded OPA, a Starlark OAuth adapter and a loopback TLS upstream. These results do not include pinned-schema normalization, real provider latency or SPIRE processes. The November 9 run at 09:56 UTC produced:
+
+| Measurement | Result |
+| --- | --- |
+| Idle gateway RSS | 30,120 KiB, approximately 29.4 MiB |
+| Sampled active peak RSS | 34,456 KiB, approximately 33.6 MiB |
+| Idle process CPU over 1.000 seconds | 0 observed CPU ticks, with 10 ms tick resolution |
+| Active process CPU / elapsed time | 1,310 ms / 821.6 ms, with concurrent execution |
+| Warm request p50 / p95 / p99 | 3.079 / 4.526 / 4.903 ms |
+| Cold request including local token acquisition | 6.026 ms |
+| Separate local client-credentials reacquisition | 2.444 ms |
+| Warm requests / client concurrency | 1,000 / 4 |
+| Daemon credential exchanges | 1, including the cold request |
+
+RSS comes from the daemon's `/proc` data, not the benchmark client. Active RSS is sampled, not an exact allocator high-water mark. Acquisition uses fresh HTTP/1 TLS connections. The separate invalidation/reacquisition check adds two exchanges outside the daemon's single-exchange count. A zero observed idle CPU count is a measurement-resolution result, not a guarantee of zero CPU consumption. Provider refresh latency, schema-restricted workload costs, SPIRE server/agent resource use and installed deployment measurements remain pending.
+
+Final local verification also passed the uncached race suite, vet, build, all eight offline configuration examples, the checked-in explanation and both structured catalogs. `go mod verify` verified all modules, and `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` reported no vulnerabilities on November 9, 2026. These are point-in-time results, not a substitute for later dependency scans.
+
+For subsequent measurements, record the binary revision, Go version, selected schema/policy sizes, request mix, concurrency and hardware. Measure gateway idle RSS/CPU, warm authorized-request latency, acquisition/refresh latency and active memory separately. Use sanitized credential and gateway counters to distinguish cached requests from refreshes. Measure SPIRE server and agent separately when deployed. Keep the tested boundary and external gaps explicit.
