@@ -24,6 +24,16 @@ gfx-labs/pdp and denies issue 2 despite the matching grant.
   operations, regardless of HTTP method. An explicit operation grant with no
   mode requires a reviewed registry entry and can deliberately grant a
   destructive or admin operation. Its scope must list the operations.
+- Reviewed operation metadata can attach `constraints` that every restricted
+  profile and explicit operation grant must satisfy. Object constraints select
+  an object using `source`, `field` and `path`, reject keys outside
+  `allowed_keys`, and require every `required_string_keys` entry to be a
+  nonempty string. They do not flatten an array into a valid object. The
+  reviewed Linear comment operation allows only `issueId` and `body`, both
+  required. An approved issue alongside `projectId`, `parentId`, actor, Slack
+  or other alternate-target keys is not an authorized issue-only comment.
+  Full grants deliberately bypass reviewed operation constraints. Put a shape
+  restriction in `mandatory` to apply it to full grants as well.
 - The `untyped:` operation ID namespace is reserved for schema-free gateway
   requests. Registry entries cannot use it, so restricted modes cannot authorize
   a schema-free synthetic operation by configuration accident.
@@ -31,6 +41,9 @@ gfx-labs/pdp and denies issue 2 despite the matching grant.
   resource types `repository` and `issue`. Every requested resource of that type
   must match, and the type must be present. Resources come from trusted normalized
   operation metadata or explicit resource selectors in the reviewed registry.
+  An absent optional resource selector produces no resource. Resource-constrained
+  grants and mandatory rules still require their requested resource types, but
+  an unrelated full grant does not acquire a profile's optional target requirement.
   Resource IDs are exact scalar strings or JSON integers, never rounded floats.
   Numeric IDs normalize equivalent decimal/exponent forms and are limited to
   1024 decimal digits. Fractions or larger numeric IDs fail closed.

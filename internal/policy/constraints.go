@@ -74,8 +74,8 @@ func (e *Engine) directResources(input Input, u unit) ([]Resource, error) {
 				}
 				values = []any{strings.Join(parts, "/")}
 			}
-			if len(values) == 0 {
-				return nil, fmt.Errorf("resource selector %s missing for %s", selector.Type, u.operation.ID)
+			if len(values) == 0 || (len(values) == 1 && values[0] == nil) {
+				continue
 			}
 			for _, value := range values {
 				var id string
@@ -188,8 +188,48 @@ func (e *Engine) checkConstraints(c Constraints, input Input, u unit, resources 
 			return "request value outside allowed list"
 		}
 	}
+	for _, constraint := range c.Objects {
+		if constraint.Field != "" && (u.field == nil || constraint.Field != u.field.Coordinate) {
+			if deny {
+				return "object field constraint does not apply"
+			}
+			continue
+		}
+		values := selectRequestValues(input, u, constraint.Source, constraint.Path, constraint.Field, false)
+		matched := false
+		for _, value := range values {
+			reason := objectRestriction(constraint, value)
+			if reason == "" {
+				matched = true
+			} else if !deny {
+				return reason
+			}
+		}
+		if !matched {
+			return "required constrained object missing or invalid"
+		}
+	}
 	if c.Relationship != nil {
 		return e.relationship(*c.Relationship, input, resources, now)
+	}
+	return ""
+}
+
+func objectRestriction(constraint ObjectConstraint, value any) string {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return "required request object missing"
+	}
+	for key := range object {
+		if !contains(constraint.AllowedKeys, key) {
+			return "request object contains a forbidden key"
+		}
+	}
+	for _, key := range constraint.RequiredStringKeys {
+		text, ok := object[key].(string)
+		if !ok || strings.TrimSpace(text) == "" {
+			return "request object requires nonempty string keys"
+		}
 	}
 	return ""
 }
@@ -311,6 +351,10 @@ func (e *Engine) relationship(requirement RelationshipRequirement, input Input, 
 }
 
 func selectValues(input Input, u unit, source string, path []string, field string) []any {
+	return selectRequestValues(input, u, source, path, field, true)
+}
+
+func selectRequestValues(input Input, u unit, source string, path []string, field string, flatten bool) []any {
 	var root any
 	switch source {
 	case "path":
@@ -349,16 +393,16 @@ func selectValues(input Input, u unit, source string, path []string, field strin
 		}
 		root = a
 	}
-	return walkValues(root, path)
+	return walkValues(root, path, flatten)
 }
 
 // Wildcards select every member, never one convenient member of a collection.
-func walkValues(value any, path []string) []any {
+func walkValues(value any, path []string, flatten bool) []any {
 	if len(path) == 0 {
-		if array, ok := value.([]any); ok {
+		if array, ok := value.([]any); ok && flatten {
 			var out []any
 			for _, item := range array {
-				out = append(out, walkValues(item, nil)...)
+				out = append(out, walkValues(item, nil, flatten)...)
 			}
 			return out
 		}
@@ -369,17 +413,17 @@ func walkValues(value any, path []string) []any {
 		switch v := value.(type) {
 		case []any:
 			for _, item := range v {
-				out = append(out, walkValues(item, path[1:])...)
+				out = append(out, walkValues(item, path[1:], flatten)...)
 			}
 		case map[string]any:
 			for _, key := range sortedKeys(v) {
-				out = append(out, walkValues(v[key], path[1:])...)
+				out = append(out, walkValues(v[key], path[1:], flatten)...)
 			}
 		}
 		return out
 	}
 	if object, ok := value.(map[string]any); ok {
-		return walkValues(object[path[0]], path[1:])
+		return walkValues(object[path[0]], path[1:], flatten)
 	}
 	return []any{nil}
 }

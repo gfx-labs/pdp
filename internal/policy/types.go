@@ -83,6 +83,16 @@ type Operation struct {
 	Classification Classification     `json:"classification"`
 	Reviewed       bool               `json:"reviewed"`
 	Resources      []ResourceSelector `json:"resources,omitempty"`
+	Constraints    Constraints        `json:"constraints,omitempty"`
+}
+
+// ObjectConstraint limits each selected object without merging field occurrences.
+type ObjectConstraint struct {
+	Source             string   `json:"source"`
+	Path               []string `json:"path"`
+	Field              string   `json:"field,omitempty"`
+	AllowedKeys        []string `json:"allowed_keys"`
+	RequiredStringKeys []string `json:"required_string_keys,omitempty"`
 }
 
 // ValueConstraint selects request values. Every selected value must be in Values.
@@ -113,6 +123,7 @@ type Constraints struct {
 	Issues        []string                 `json:"issues,omitempty"`
 	Resources     []Resource               `json:"resources,omitempty"`
 	Values        []ValueConstraint        `json:"values,omitempty"`
+	Objects       []ObjectConstraint       `json:"objects,omitempty"`
 	SchemaDigests []string                 `json:"schema_digests,omitempty"`
 	Relationship  *RelationshipRequirement `json:"relationship,omitempty"`
 }

@@ -246,6 +246,51 @@ func TestGraphQLResourceInheritanceIsOccurrenceScoped(t *testing.T) {
 	decide(t, e, in, false)
 }
 
+func TestReviewedMutationObjectTargetRestrictions(t *testing.T) {
+	shape := policy.ObjectConstraint{Source: "graphql", Field: "Mutation.commentCreate", Path: []string{"input"}, AllowedKeys: []string{"issueId", "body"}, RequiredStringKeys: []string{"issueId", "body"}}
+	op := policy.Operation{ID: "Mutation.commentCreate", Provider: "github", Reviewed: true, Classification: policy.WriteOperation, Resources: []policy.ResourceSelector{{Type: "issue", Source: "graphql", Path: []string{"input", "issueId"}}}, Constraints: policy.Constraints{Objects: []policy.ObjectConstraint{shape}}}
+	input := func(value any) policy.Input {
+		in := request()
+		in.Operations = nil
+		in.GraphQL = []policy.FieldOccurrence{{Coordinate: op.ID, Path: []string{"add"}, Arguments: map[string]any{"input": value}}}
+		return in
+	}
+	valid := map[string]any{"issueId": "approved", "body": "comment"}
+	for _, mode := range []policy.Mode{policy.ReadWrite, ""} {
+		t.Run(string(mode)+"restricted", func(t *testing.T) {
+			g := full()
+			g.Mode = mode
+			g.Constraints.Issues = []string{"approved"}
+			if mode == "" {
+				g.Scope.Operations = []string{op.ID}
+			}
+			e := engine(t, policy.Config{Operations: []policy.Operation{op}, Grants: []policy.Grant{g}})
+			decide(t, e, input(valid), true)
+			for _, key := range []string{"projectId", "parentId", "documentContentId", "postId", "createAsUser", "slackChannelId", "slackNotificationOptOut"} {
+				decide(t, e, input(map[string]any{"issueId": "approved", "body": "comment", key: "foreign"}), false)
+			}
+			for _, value := range []any{map[string]any{"issueId": "approved"}, map[string]any{"issueId": "approved", "body": " "}, map[string]any{"body": "comment", "projectId": "foreign"}, map[string]any{"issueId": "approved", "body": true}, []any{valid}, nil} {
+				decide(t, e, input(value), false)
+			}
+			in := input(valid)
+			in.GraphQL = append(in.GraphQL, policy.FieldOccurrence{Coordinate: op.ID, Path: []string{"other"}, Arguments: map[string]any{"input": map[string]any{"issueId": "approved", "body": "comment", "parentId": "foreign"}}})
+			decide(t, e, in, false)
+		})
+	}
+	// Full deliberately bypasses reviewed profile safety, not mandatory rules.
+	c := policy.Config{Operations: []policy.Operation{op}, Grants: []policy.Grant{full()}}
+	in := input(map[string]any{"body": "comment", "projectId": "foreign"})
+	decide(t, engine(t, c), in, true)
+	c.Mandatory = []policy.Rule{{ID: "only-issue-comments", Scope: policy.Scope{Operations: []string{op.ID}}, Constraints: policy.Constraints{Objects: []policy.ObjectConstraint{shape}}}}
+	decide(t, engine(t, c), in, false)
+	decide(t, engine(t, c), input(valid), true)
+	c.Operations[0].Constraints.Objects[0].RequiredStringKeys = []string{"not-allowed"}
+	c.Revision = "invalid-shape"
+	if _, err := policy.New(context.Background(), c); err == nil {
+		t.Fatal("accepted required object key outside allowed keys")
+	}
+}
+
 // Distinct occurrences must not merge arguments or inherit one matching alias.
 func TestGraphQLRepeatedOccurrencesAndCollectionConstraints(t *testing.T) {
 	g := full()

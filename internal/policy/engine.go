@@ -179,6 +179,13 @@ func (e *Engine) Evaluate(ctx context.Context, input Input) (Decision, error) {
 			if !scopeMatches(grant.Scope, input, u.operation.ID) || !e.modeMatches(grant, input, u.operation.ID) {
 				continue
 			}
+			if grant.Mode != Full {
+				operation := e.operations[input.Provider+"\x00"+u.operation.ID]
+				if reason := e.constraints(operation.Constraints, input, u, resources, now); reason != "" {
+					d.Reasons = append(d.Reasons, "reviewed operation restriction for "+u.operation.ID+": "+reason)
+					continue
+				}
+			}
 			if reason := e.constraints(grant.Constraints, input, u, resources, now); reason != "" {
 				d.Reasons = append(d.Reasons, "grant "+grant.ID+" rejected for "+u.operation.ID+": "+reason)
 				continue

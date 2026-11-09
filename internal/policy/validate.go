@@ -45,6 +45,9 @@ func (e *Engine) validate() error {
 				}
 			}
 		}
+		if err := validateConstraints(op.Constraints); err != nil {
+			return fmt.Errorf("operation %s: %w", op.ID, err)
+		}
 		e.operations[key] = op
 		if !op.Reviewed {
 			e.diagnostics = append(e.diagnostics, Diagnostic{Code: "unreviewed_operation", Message: "operation " + op.ID + " cannot satisfy restricted grants"})
@@ -56,35 +59,15 @@ func (e *Engine) validate() error {
 			return fmt.Errorf("rule ID must be nonempty and unique: %q", id)
 		}
 		ids[id] = true
-		for _, values := range [][]string{scope.Identities, scope.Providers, scope.Bindings, scope.Operations, c.Repositories, c.Issues, c.SchemaDigests} {
+		for _, values := range [][]string{scope.Identities, scope.Providers, scope.Bindings, scope.Operations} {
 			for _, value := range values {
 				if strings.TrimSpace(value) == "" || value == "*" {
 					return fmt.Errorf("rule %s: empty and wildcard scope/list values are forbidden", id)
 				}
 			}
 		}
-		for _, resource := range c.Resources {
-			if resource.Type == "" || resource.ID == "" {
-				return fmt.Errorf("rule %s: resource type and ID required", id)
-			}
-		}
-		for _, constraint := range c.Values {
-			if err := validateSelector(constraint.Source, constraint.Path, constraint.Field); err != nil {
-				return fmt.Errorf("rule %s: %w", id, err)
-			}
-			if len(constraint.Values) == 0 {
-				return fmt.Errorf("rule %s: value constraint needs allowed values", id)
-			}
-		}
-		if c.Relationship != nil {
-			if c.Relationship.Permission == "" {
-				return fmt.Errorf("rule %s relationship permission required", id)
-			}
-			for _, kind := range c.Relationship.ResourceTypes {
-				if kind == "" {
-					return fmt.Errorf("rule %s relationship resource type required", id)
-				}
-			}
+		if err := validateConstraints(c); err != nil {
+			return fmt.Errorf("rule %s: %w", id, err)
 		}
 		for _, operation := range scope.Operations {
 			found := false
@@ -148,6 +131,57 @@ func (e *Engine) validate() error {
 		for _, edge := range s.TaskResources {
 			if edge.Task == "" || edge.Resource.Type == "" || edge.Resource.ID == "" || edge.Permission == "" || edge.ExpiresAt.IsZero() {
 				return fmt.Errorf("task-resource edge requires task, resource, permission and expiry")
+			}
+		}
+	}
+	return nil
+}
+
+func validateConstraints(c Constraints) error {
+	for _, values := range [][]string{c.Repositories, c.Issues, c.SchemaDigests} {
+		for _, value := range values {
+			if strings.TrimSpace(value) == "" || value == "*" {
+				return fmt.Errorf("empty and wildcard constraint list values are forbidden")
+			}
+		}
+	}
+	for _, resource := range c.Resources {
+		if resource.Type == "" || resource.ID == "" {
+			return fmt.Errorf("resource type and ID required")
+		}
+	}
+	for _, constraint := range c.Values {
+		if err := validateSelector(constraint.Source, constraint.Path, constraint.Field); err != nil {
+			return err
+		}
+		if len(constraint.Values) == 0 {
+			return fmt.Errorf("value constraint needs allowed values")
+		}
+	}
+	for _, constraint := range c.Objects {
+		if err := validateSelector(constraint.Source, constraint.Path, constraint.Field); err != nil {
+			return err
+		}
+		seen := map[string]bool{}
+		for _, key := range constraint.AllowedKeys {
+			if key == "" || seen[key] {
+				return fmt.Errorf("object allowed keys must be nonempty and unique")
+			}
+			seen[key] = true
+		}
+		for _, key := range constraint.RequiredStringKeys {
+			if !seen[key] {
+				return fmt.Errorf("required object string key must also be allowed")
+			}
+		}
+	}
+	if c.Relationship != nil {
+		if c.Relationship.Permission == "" {
+			return fmt.Errorf("relationship permission required")
+		}
+		for _, kind := range c.Relationship.ResourceTypes {
+			if kind == "" {
+				return fmt.Errorf("relationship resource type required")
 			}
 		}
 	}
