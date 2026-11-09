@@ -143,6 +143,86 @@ func TestJSONNumericValueSemantics(t *testing.T) {
 	decide(t, engine(t, policy.Config{Grants: []policy.Grant{g}}), in, true)
 }
 
+func TestTypedQueryConstraintsNeverFallBackToRawSchemaValues(t *testing.T) {
+	g := full()
+	g.Constraints.Values = []policy.ValueConstraint{
+		{Source: "query", Path: []string{"count"}, Values: []any{1}},
+		{Source: "query", Path: []string{"enabled"}, Values: []any{true}},
+	}
+	e := engine(t, policy.Config{Grants: []policy.Grant{g}})
+	for _, test := range []struct {
+		name  string
+		query map[string]any
+		want  bool
+	}{
+		{"typed", map[string]any{"count": int64(1), "enabled": true}, true},
+		{"wrong-integer", map[string]any{"count": 2, "enabled": true}, false},
+		{"wrong-boolean", map[string]any{"count": 1, "enabled": false}, false},
+		{"untyped-integer", map[string]any{"count": "1", "enabled": true}, false},
+		{"missing-integer", map[string]any{"enabled": true}, false},
+		{"missing-normalized-query", nil, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			in := request()
+			in.SchemaDigest = "sha256:typed"
+			in.HTTP.Query = map[string][]string{"count": {"1"}, "enabled": {"true"}}
+			in.HTTP.NormalizedQuery = test.query
+			decide(t, e, in, test.want)
+		})
+	}
+	// Raw URL spelling cannot change the authoritative normalized value.
+	in := request()
+	in.SchemaDigest = "sha256:typed"
+	in.HTTP.Query = map[string][]string{"count": {"999"}, "enabled": {"false"}}
+	in.HTTP.NormalizedQuery = map[string]any{"count": 1, "enabled": true}
+	decide(t, e, in, true)
+	g.Constraints.Values = []policy.ValueConstraint{{Source: "query", Path: []string{"count"}, Values: []any{"1"}}}
+	e = engine(t, policy.Config{Grants: []policy.Grant{g}})
+	in = request()
+	in.HTTP.Query = map[string][]string{"count": {"1"}}
+	decide(t, e, in, true)
+	in.SchemaDigest = "sha256:typed"
+	decide(t, e, in, false)
+	// A missing normalized map cannot neutralize a query deny beneath full.
+	e = engine(t, policy.Config{Grants: []policy.Grant{full()}, Denies: []policy.Rule{{ID: "blocked-query", Constraints: policy.Constraints{Values: []policy.ValueConstraint{{Source: "query", Path: []string{"count"}, Values: []any{1}}}}}}})
+	decide(t, e, in, false)
+}
+
+func TestRegoSeesVerifiedIdentityProofMetadata(t *testing.T) {
+	unixSource := `package pdp.custom
+import rego.v1
+deny contains "unix authentication required" if { object.get(input.identity, "auth_method", "") != "unix" }
+deny contains "root UID required" if { object.get(input.identity, "uid", -1) != 0 }
+`
+	e := engine(t, policy.Config{Grants: []policy.Grant{full()}, CustomModules: map[string]string{"identity.rego": unixSource}})
+	uid := uint32(0)
+	in := request()
+	in.Identity.AuthMethod = "unix"
+	in.Identity.UID = &uid
+	d := decide(t, e, in, true)
+	if d.Identity.UID == nil || *d.Identity.UID != 0 || d.Identity.AuthMethod != "unix" {
+		t.Fatalf("lost verified identity proof metadata: %+v", d.Identity)
+	}
+	*d.Identity.UID = 42
+	decide(t, e, in, true)
+	in.Identity.UID = nil
+	decide(t, e, in, false)
+	in.Identity.UID = &uid
+	in.Identity.AuthMethod = "spiffe"
+	decide(t, e, in, false)
+	spiffeSource := `package pdp.custom
+import rego.v1
+deny contains "SPIFFE authentication required" if { object.get(input.identity, "auth_method", "") != "spiffe" }
+deny contains "wrong verified SVID" if { object.get(input.identity, "spiffe_id", "") != "spiffe://example.org/workload" }
+`
+	e = engine(t, policy.Config{Grants: []policy.Grant{full()}, CustomModules: map[string]string{"identity.rego": spiffeSource}})
+	in.Identity.UID = nil
+	in.Identity.SPIFFEID = "spiffe://example.org/workload"
+	decide(t, e, in, true)
+	in.Identity.SPIFFEID = "spiffe://other.org/workload"
+	decide(t, e, in, false)
+}
+
 func TestGraphQLResourceInheritanceIsOccurrenceScoped(t *testing.T) {
 	g := full()
 	g.Constraints.Issues = []string{"allowed"}
@@ -371,6 +451,12 @@ func TestCheckedInPolicyExample(t *testing.T) {
 	e = engine(t, c)
 	in.HTTP.Query = map[string][]string{"dangerous": {"true"}}
 	decide(t, e, in, false)
+	in.SchemaDigest = "sha256:typed"
+	in.HTTP.Query["dangerous"] = []string{"1"}
+	in.HTTP.NormalizedQuery = map[string]any{"dangerous": true}
+	decide(t, e, in, false)
+	in.HTTP.NormalizedQuery["dangerous"] = false
+	decide(t, e, in, true)
 	b, err = os.ReadFile("../../policies/restricted.json")
 	if err != nil {
 		t.Fatal(err)

@@ -320,6 +320,10 @@ func selectValues(input Input, u unit, source string, path []string, field strin
 		}
 		root = m
 	case "query":
+		if input.SchemaDigest != "" || input.HTTP.NormalizedQuery != nil {
+			root = input.HTTP.NormalizedQuery
+			break
+		}
 		m := map[string]any{}
 		for k, values := range input.HTTP.Query {
 			a := make([]any, len(values))

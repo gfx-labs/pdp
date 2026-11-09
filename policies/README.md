@@ -47,7 +47,11 @@ gfx-labs/pdp and denies issue 2 despite the matching grant.
   including `full`. Empty rule scopes apply globally.
 - Value selectors read `path`, `query`, `body`, `graphql`, `variables` or
   `resource`. `path` is the normalized HTTP path-parameter map. `query` retains
-  all values. `graphql` reads only the current field occurrence's argument map.
+  the schema-normalized value types, including integers and booleans, from
+  `http.normalized_query`. Schema-backed inputs never fall back to raw query
+  strings when normalized values are absent. Only schema-free legacy inputs
+  without a normalized query use raw `http.query`, retaining every URL value.
+  `graphql` reads only the current field occurrence's argument map.
   Its optional `field` limits applicability to one schema coordinate.
   `resource` reads the current operation's supplied resource metadata. `*` path
   segments select every array/object member. Missing required values fail,
@@ -96,6 +100,11 @@ trusted `identity`, `provider`, `binding`, `schema_digest`, normalized `http`,
 facts envelope containing grant candidates, denials, revision and decision time.
 Request content cannot replace those facts. The gateway must never populate
 trusted envelope fields from unauthenticated request metadata.
+Verified identity metadata includes `auth_method`, `spiffe_id` when authenticated
+by SPIFFE, and `uid` when authenticated by Unix peer credentials. UID zero is
+present, not confused with absent metadata. A configured principal alias does
+not replace the authentication proof identity. Custom Rego should use
+`http.normalized_query` for schema-typed conditions, not raw `http.query` strings.
 
 ## Publication and diagnostics
 

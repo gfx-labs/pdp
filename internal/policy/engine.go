@@ -122,6 +122,14 @@ func (e *Engine) Evaluate(ctx context.Context, input Input) (Decision, error) {
 		d.Reasons = append(d.Reasons, "invalid trusted input envelope")
 		return d, nil
 	}
+	if input.SchemaDigest != "" {
+		for key := range input.HTTP.Query {
+			if _, present := input.HTTP.NormalizedQuery[key]; !present {
+				d.Reasons = append(d.Reasons, "schema-backed query normalization is incomplete")
+				return d, nil
+			}
+		}
+	}
 	// Freeze input values as JSON, both for a consistent Rego view and selectors.
 	b, err := json.Marshal(input)
 	if err != nil {
@@ -133,6 +141,7 @@ func (e *Engine) Evaluate(ctx context.Context, input Input) (Decision, error) {
 		return d, err
 	}
 	input = frozenInput
+	d.Identity = input.Identity
 	var regoInput map[string]any
 	if err = decodeJSON(b, &regoInput); err != nil {
 		return d, err
