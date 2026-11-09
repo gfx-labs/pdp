@@ -1,0 +1,14 @@
+{
+  "revision": "direct-example-1",
+  "grants": [
+    {
+      "id": "local-github-full",
+      "scope": {
+        "identities": ["uid:1000"],
+        "providers": ["github"],
+        "bindings": ["github-work"]
+      },
+      "mode": "full"
+    }
+  ]
+}
