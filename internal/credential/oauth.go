@@ -25,6 +25,9 @@ func (e *execution) post(alias, contentType string, body []byte, headers http.He
 	if err != nil {
 		return nil, failure(CodeInvalid)
 	}
+	// NewRequest installs replay support for bytes.Reader by default.
+	req.GetBody = nil
+	req.Close = true
 	req.Header = headers.Clone()
 	if req.Header == nil {
 		req.Header = make(http.Header)

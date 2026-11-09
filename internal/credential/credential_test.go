@@ -56,7 +56,9 @@ func manager(t *testing.T, c credential.Config) *credential.Manager {
 }
 func tlsConfig(t *testing.T, script string, handler http.HandlerFunc) (credential.Config, *httptest.Server) {
 	t.Helper()
-	server := httptest.NewTLSServer(handler)
+	server := httptest.NewUnstartedServer(handler)
+	server.EnableHTTP2 = true
+	server.StartTLS()
 	t.Cleanup(server.Close)
 	roots := x509.NewCertPool()
 	roots.AddCert(server.Certificate())
@@ -172,16 +174,30 @@ func TestOAuthSingleflightAndFailureClosed(t *testing.T) {
 		_, _ = io.WriteString(w, `{"access_token":"fixture-access","token_type":"Bearer","expires_in":3600,"scope":"read write"}`)
 	})
 	m := manager(t, c)
+	var releaseOnce sync.Once
+	releaseEndpoint := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseEndpoint)
 	var wg sync.WaitGroup
 	errs := make(chan error, 24)
 	wg.Add(1)
 	go func() { defer wg.Done(); _, err := m.Get(context.Background(), request()); errs <- err }()
 	<-entered
+	initial := m.Stats()
+	if initial.InFlight != 1 || initial.Acquisitions != 1 || initial.Misses != 1 || initial.Hits != 0 || initial.Failures != 0 {
+		t.Fatal("initial acquisition metrics are inconsistent")
+	}
+	joinContext, cancelJoin := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	_, joinErr := m.Get(joinContext, request())
+	cancelJoin()
+	requireCode(t, joinErr, credential.CodeCanceled)
+	if stats := m.Stats(); stats.Coalesced != 1 || stats.InFlight != 1 {
+		t.Fatal("coalesced cancellation was not counted without starting another acquisition")
+	}
 	for range 20 {
 		wg.Add(1)
 		go func() { defer wg.Done(); _, err := m.Get(context.Background(), request()); errs <- err }()
 	}
-	close(release)
+	releaseEndpoint()
 	wg.Wait()
 	close(errs)
 	for err := range errs {
@@ -192,6 +208,10 @@ func TestOAuthSingleflightAndFailureClosed(t *testing.T) {
 	if count.Load() != 1 {
 		t.Fatal("duplicate token exchange for identical concurrent scope key")
 	}
+	completed := m.Stats()
+	if completed.Acquisitions != 1 || completed.InFlight != 0 || completed.Failures != 0 || completed.Misses != completed.Coalesced+1 || completed.Hits+completed.Coalesced != 21 || completed.AcquisitionNanoseconds == 0 {
+		t.Fatal("completed credential metrics are inconsistent")
+	}
 	fail.Store(true)
 	m.Invalidate(request())
 	_, err := m.Get(context.Background(), request())
@@ -201,6 +221,10 @@ func TestOAuthSingleflightAndFailureClosed(t *testing.T) {
 	}
 	if count.Load() != 2 {
 		t.Fatal("invalidation did not force one fresh exchange")
+	}
+	failed := m.Stats()
+	if failed.Acquisitions != 2 || failed.Failures != 1 || failed.InFlight != 0 || failed.AcquisitionNanoseconds <= completed.AcquisitionNanoseconds {
+		t.Fatal("failed acquisition metrics are inconsistent")
 	}
 }
 
@@ -278,6 +302,68 @@ func TestRuntimeAndTransportBounds(t *testing.T) {
 				t.Fatal("script traceback leaked")
 			}
 		})
+	}
+}
+
+func TestTokenExchangesUseFreshHTTP1WithoutRefreshReplay(t *testing.T) {
+	dir := privateDir(t)
+	statePath := secretFile(t, dir, "state.json", `{"refresh_token":"before","scopes":["read","write"]}`)
+	var mu sync.Mutex
+	addresses := map[string]bool{}
+	count := 0
+	c, _ := tlsConfig(t, adapters.OAuthRefresh, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		count++
+		attempt := count
+		alreadyUsed := addresses[r.RemoteAddr]
+		addresses[r.RemoteAddr] = true
+		mu.Unlock()
+		if r.TLS == nil {
+			t.Error("token exchange was not TLS")
+			w.WriteHeader(500)
+			return
+		}
+		if r.ProtoMajor != 1 || (r.TLS.NegotiatedProtocol != "" && r.TLS.NegotiatedProtocol != "http/1.1") || !r.Close || alreadyUsed {
+			t.Errorf("token transport proto=%s ALPN=%q close=%t reused=%t", r.Proto, r.TLS.NegotiatedProtocol, r.Close, alreadyUsed)
+		}
+		if attempt == 1 {
+			_, _ = io.WriteString(w, `{"access_token":"access","refresh_token":"after","token_type":"Bearer","expires_in":3600,"scope":"read write"}`)
+			return
+		}
+		// Simulate a provider consuming a rotating grant then losing its reply.
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("token exchange did not use HTTP/1")
+			w.WriteHeader(500)
+			return
+		}
+		connection, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = connection.Close()
+	})
+	b := c.Bindings["binding"]
+	b.StateFile = statePath
+	c.Bindings["binding"] = b
+	m := manager(t, c)
+	if _, err := m.Get(context.Background(), request()); err != nil {
+		t.Fatal(err)
+	}
+	m.Invalidate(request())
+	_, err := m.Get(context.Background(), request())
+	requireCode(t, err, credential.CodeUnavailable)
+	_, err = m.Get(context.Background(), request())
+	requireCode(t, err, credential.CodePersistence)
+	restarted := manager(t, c)
+	_, err = restarted.Get(context.Background(), request())
+	requireCode(t, err, credential.CodePersistence)
+	mu.Lock()
+	defer mu.Unlock()
+	if count != 2 || len(addresses) != 2 {
+		t.Fatal("unknown rotating exchange was replayed or connection was reused")
 	}
 }
 

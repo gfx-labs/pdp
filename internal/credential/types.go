@@ -104,6 +104,19 @@ type Request struct {
 	Scopes   []string `json:"scopes"`
 }
 
+// Stats is a coherent cumulative snapshot without credential or provider labels.
+// Misses includes coalesced and saturated requests. Acquisitions and Failures
+// count actual executions, not joining callers or rejected requests.
+type Stats struct {
+	Hits                   uint64 `json:"hits"`
+	Misses                 uint64 `json:"misses"`
+	Coalesced              uint64 `json:"coalesced"`
+	Acquisitions           uint64 `json:"acquisitions"`
+	Failures               uint64 `json:"failures"`
+	InFlight               uint64 `json:"in_flight"`
+	AcquisitionNanoseconds uint64 `json:"acquisition_nanoseconds"`
+}
+
 // SecretSource selects a mounted file or a name in the systemd credentials dir.
 // Exactly one selector is required. Values are read only inside native helpers.
 type SecretSource struct {

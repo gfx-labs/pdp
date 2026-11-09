@@ -35,6 +35,7 @@ type Manager struct {
 	cache     map[string]Result
 	calls     map[string]*flight
 	poisoned  map[string]bool
+	stats     Stats
 	closed    bool
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -43,6 +44,17 @@ type Manager struct {
 func (*Manager) String() string                  { return "credential.Manager([redacted])" }
 func (m *Manager) GoString() string              { return m.String() }
 func (m *Manager) Format(s fmt.State, verb rune) { _, _ = s.Write([]byte(m.String())) }
+
+// Stats uses the existing cache mutex, adding no atomic operation to cache hits.
+// AcquisitionNanoseconds includes script, lock, disk and network time until
+// completion, but excludes joined waiters and input validation.
+func (m *Manager) Stats() Stats {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snapshot := m.stats
+	snapshot.InFlight = uint64(len(m.calls))
+	return snapshot
+}
 
 // New validates and compiles configuration without fetching any secret or token.
 // The caller must replace the entire Manager on configuration reload.
@@ -163,7 +175,22 @@ func New(cfg Config) (*Manager, error) {
 	if roots != nil {
 		roots = roots.Clone()
 	}
-	m.transport = &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: l.Timeout, KeepAlive: 30 * time.Second}).DialContext, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}, TLSHandshakeTimeout: l.Timeout, ResponseHeaderTimeout: l.Timeout, MaxResponseHeaderBytes: int64(l.MaxHTTPResponseBytes), MaxIdleConns: l.MaxConcurrent, MaxIdleConnsPerHost: l.MaxConcurrent, MaxConnsPerHost: l.MaxConcurrent, IdleConnTimeout: 30 * time.Second, DisableCompression: true}
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	// A rotating grant is not replay-safe, including transport-level retries.
+	// Fresh HTTP/1 connections avoid reused-connection and HTTP/2 retry paths.
+	m.transport = &http.Transport{
+		Proxy:                  nil,
+		DialContext:            (&net.Dialer{Timeout: l.Timeout}).DialContext,
+		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, NextProtos: []string{"http/1.1"}},
+		Protocols:              protocols,
+		DisableKeepAlives:      true,
+		TLSHandshakeTimeout:    l.Timeout,
+		ResponseHeaderTimeout:  l.Timeout,
+		MaxResponseHeaderBytes: int64(l.MaxHTTPResponseBytes),
+		MaxConnsPerHost:        l.MaxConcurrent,
+		DisableCompression:     true,
+	}
 	m.client = &http.Client{Transport: m.transport, Timeout: l.Timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	return m, nil
@@ -268,12 +295,15 @@ func (m *Manager) Get(ctx context.Context, r Request) (Result, error) {
 	}
 	if cached, ok := m.cache[key]; ok {
 		if time.Now().Add(m.cfg.Limits.ExpiryMargin).Before(cached.ExpiresAt) {
+			m.stats.Hits++
 			m.mu.Unlock()
 			return cached, nil
 		}
 		delete(m.cache, key)
 	}
+	m.stats.Misses++
 	if call, ok := m.calls[key]; ok {
+		m.stats.Coalesced++
 		m.mu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -290,7 +320,9 @@ func (m *Manager) Get(ctx context.Context, r Request) (Result, error) {
 	}
 	call := &flight{done: make(chan struct{})}
 	m.calls[key] = call
+	m.stats.Acquisitions++
 	m.mu.Unlock()
+	started := time.Now()
 	acquisition, cancel := context.WithTimeout(ctx, m.cfg.Limits.Timeout)
 	stop := context.AfterFunc(m.ctx, cancel)
 	result, err := m.execute(acquisition, r)
@@ -300,6 +332,10 @@ func (m *Manager) Get(ctx context.Context, r Request) (Result, error) {
 	if call.invalid || m.closed {
 		result = Result{}
 		err = failure(CodeUnavailable)
+	}
+	m.stats.AcquisitionNanoseconds += uint64(time.Since(started).Nanoseconds())
+	if err != nil {
+		m.stats.Failures++
 	}
 	if err == nil {
 		if len(m.cache) >= m.cfg.Limits.CacheEntries {
