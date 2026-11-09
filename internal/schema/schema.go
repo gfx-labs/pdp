@@ -43,12 +43,13 @@ type FieldOccurrence struct {
 }
 
 type Operation struct {
-	ID         string `json:"id"`
-	Method     string `json:"method,omitempty"`
-	Path       string `json:"path,omitempty"`
-	Type       string `json:"type,omitempty"`
-	Coordinate string `json:"coordinate,omitempty"`
-	Signature  string `json:"signature"`
+	ID         string          `json:"id"`
+	Method     string          `json:"method,omitempty"`
+	Path       string          `json:"path,omitempty"`
+	Type       string          `json:"type,omitempty"`
+	Coordinate string          `json:"coordinate,omitempty"`
+	Signature  string          `json:"signature"`
+	Contract   json.RawMessage `json:"contract,omitempty"`
 }
 type Catalog struct {
 	Protocol   string      `json:"protocol"`
@@ -90,7 +91,7 @@ func Diff(before, after Catalog) Changes {
 		next, ok := b[id]
 		if !ok {
 			out.Removed = append(out.Removed, id)
-		} else if op != next {
+		} else if digest(op) != digest(next) {
 			out.Changed = append(out.Changed, id)
 		}
 	}
@@ -111,6 +112,9 @@ func digest(v any) string {
 }
 func cloneCatalog(c Catalog) Catalog {
 	c.Operations = append([]Operation(nil), c.Operations...)
+	for i := range c.Operations {
+		c.Operations[i].Contract = append(json.RawMessage(nil), c.Operations[i].Contract...)
+	}
 	return c
 }
 

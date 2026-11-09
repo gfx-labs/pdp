@@ -106,7 +106,7 @@ func CompileGraphQL(sdl []byte) (*GraphQLSchema, error) {
 				kind = "subscription"
 			}
 			sig := map[string]any{"field": fieldSignature(f), "inputs": out.inputDependencies(f)}
-			out.catalog.Operations = append(out.catalog.Operations, Operation{ID: coordinate, Coordinate: coordinate, Type: kind, Signature: digest(sig)})
+			out.catalog.Operations = append(out.catalog.Operations, Operation{ID: coordinate, Coordinate: coordinate, Type: kind, Signature: digest(sig), Contract: out.graphQLContract(f)})
 		}
 	}
 	root := func(d *ast.Definition) string {

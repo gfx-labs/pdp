@@ -257,7 +257,7 @@ func CompileREST(spec []byte) (*RESTSchema, error) {
 	})
 	out.catalog = Catalog{Protocol: "rest", Operations: []Operation{}}
 	for _, op := range out.operations {
-		out.catalog.Operations = append(out.catalog.Operations, Operation{ID: op.ID, Method: op.Method, Path: op.Template, Signature: digest(op)})
+		out.catalog.Operations = append(out.catalog.Operations, Operation{ID: op.ID, Method: op.Method, Path: op.Template, Signature: digest(op), Contract: restContract(op)})
 	}
 	sort.Slice(out.catalog.Operations, func(i, j int) bool { return out.catalog.Operations[i].ID < out.catalog.Operations[j].ID })
 	out.catalog.Digest = digest(doc)

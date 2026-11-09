@@ -23,6 +23,19 @@ The gateway must additionally enforce transport/header limits and refuse unsuppo
 
 `Catalog` operations are sorted by ID. `Digest` uses SHA-256 over deterministic JSON structures. REST digests canonicalize JSON key ordering/whitespace and include the input document, including documentation. GraphQL digests canonicalize type/field/argument maps, union/interface/enum ordering, roots and directives, excluding descriptions and source positions. GraphQL operation signatures include transitively referenced input definitions and defaults. REST operation signatures contain resolved parameter/body schemas and all supported bounds. `Diff` reports sorted added, removed and changed IDs. `ValidateReferences` rejects unknown policy operation references. Catalog changes never grant access automatically.
 
+Each operation also exposes `contract` as a canonical structured JSON object,
+not only an opaque signature. REST contracts list parameter names, locations,
+required flags and resolved validation schemas, plus JSON body requiredness and
+schema. `closed_objects` records the importer's closed-object rule. GraphQL
+contracts expose argument types/defaults/directives, transitive input definitions,
+and return type and immediate returned-type field/enum/interface/union details.
+GraphQL defaults retain their GraphQL literal spelling. A changed returned field
+contract can therefore mark both that field and an operation returning its type
+as changed. Recursive types remain named references rather than recursively
+expanding output graphs. These contract details do not change existing schema
+digests or legacy operation signatures. Catalog copies own their raw JSON storage,
+so callers cannot mutate a compiled schema through a returned contract.
+
 ## Dependency evaluation
 
 Primary sources checked on November 9, 2026:

@@ -340,7 +340,7 @@ func TestGraphQLDigestDefaultsAndReachableDiff(t *testing.T) {
 		t.Fatal(e)
 	}
 	diff = schema.Diff(a.Catalog(), c.Catalog())
-	if !reflect.DeepEqual(diff.Changed, []string{"Human.height"}) {
+	if !reflect.DeepEqual(diff.Changed, []string{"Human.height", "Query.human"}) {
 		t.Fatalf("default drift missing: %#v", diff)
 	}
 	if _, e = schema.CompileGraphQL([]byte("type Query { missing: Missing }")); e == nil {
