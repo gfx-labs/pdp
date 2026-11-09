@@ -1,0 +1,11 @@
+{
+  "query": "mutation RejectedTarget($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id body } } }",
+  "operationName": "RejectedTarget",
+  "variables": {
+    "input": {
+      "issueId": "APPROVED_ISSUE_UUID",
+      "projectId": "UNAPPROVED_PROJECT_ID",
+      "body": "This mixed-target input must be denied by the restricted profile"
+    }
+  }
+}

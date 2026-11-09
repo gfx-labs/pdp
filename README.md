@@ -54,6 +54,7 @@ Each grant's constraints are conjunctive. Multiple grants are additive. A narrow
 
 ## Deployment and validation
 
+- [GitHub and Linear use-case walkthroughs](examples/README.md), including read-only access, approved comments and denied requests with concrete JSON bodies.
 - Native provider setup: [GitHub App](examples/github-app.yaml) and [existing Linear OAuth refresh installation](examples/linear-oauth.yaml). The separate [Linear read/write example](examples/linear-read-write.yaml) deliberately uses app-actor client credentials.
 - [Configuration, profiles, limits and OAuth modes](docs/configuration.md)
 - [systemd, Kubernetes and Workload API setup](docs/deployment.md)

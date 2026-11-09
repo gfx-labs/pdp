@@ -1,0 +1,8 @@
+{
+  "query": "query CompareIssues($approved: String!, $other: String!) { approved: issue(id: $approved) { ...IssueSummary } other: issue(id: $other) { ...IssueSummary } } fragment IssueSummary on Issue { id identifier title }",
+  "operationName": "CompareIssues",
+  "variables": {
+    "approved": "APPROVED_ISSUE_UUID",
+    "other": "UNAPPROVED_ISSUE_UUID"
+  }
+}

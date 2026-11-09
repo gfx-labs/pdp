@@ -28,6 +28,7 @@ go build -o pdp ./cmd/pdp
 ./pdp validate --config examples/minimal.yaml
 ./pdp validate --config examples/github-read.yaml
 ./pdp validate --config examples/github-read-write.yaml
+./pdp validate --config examples/linear-read.yaml
 ./pdp validate --config examples/linear-read-write.yaml
 ./pdp validate --config examples/github-app.yaml
 ./pdp validate --config examples/linear-oauth.yaml
