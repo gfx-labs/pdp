@@ -12,6 +12,14 @@ Validation reads and compiles source/schema files but does not fetch a token, op
 
 ## Exact built-in profiles
 
+Policy execution is defined by [`pkg/policy/base.rego`](../pkg/policy/base.rego).
+The YAML/JSON `policy` section specifies grants, denies, mandatory restrictions,
+reviewed operations and optional relationship data. After validation, the loader
+normalizes them into immutable `data.pdp.config` for OPA. Go supplies trusted
+request facts, while Rego evaluates all authorization rules. Existing YAML/JSON
+configuration syntax is unchanged. Optional `custom_modules` add Rego denials to
+the same decision, rather than replacing the base namespace.
+
 The finite reviewed map is `pkg/config/profiles.go`. Built-ins are enabled only for the exact reviewed provider-projection digests pinned there, not merely a matching operation ID. A changed method, path, argument type or schema metadata cannot silently retain approval on reload. Updating those pins requires review. An explicit administrator `policy.operations` entry overrides a built-in entry and must supply its nonempty exact reviewed `schema_digest` and `reviewed: true` for restricted access. New schema operations never become readable or writable automatically. A restricted profile with no reviewed operations rejects loading.
 
 | Provider | Read operations/field coordinates | Additional `read_write` operation |

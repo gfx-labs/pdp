@@ -3,6 +3,7 @@ package policy
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,29 +13,27 @@ import (
 
 	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/rego"
+	"github.com/open-policy-agent/opa/v1/storage/inmem"
 )
 
-const basePolicy = `package pdp.base
-import rego.v1
+// basePolicy makes every authorization decision. Go only validates the trusted
+// envelope and extracts request facts for it.
+//
+//go:embed base.rego
+var basePolicy string
 
-default allow := false
-custom_denials := data.pdp.custom.deny
-allow if {
-  count(input._pdp.denials) == 0
-  count(input._pdp.units) > 0
-  every unit in input._pdp.units { count(unit.grants) > 0 }
-  count(custom_denials) == 0
-}
-decision := {"allow": allow, "custom_denials": custom_denials}
-`
+// Custom modules may only add reasons to this set.
+const customBase = "package pdp.custom\nimport rego.v1\ndeny contains \"unreachable\" if { false }"
 
 // Engine contains only private, frozen state and prepared queries. Build a new
 // Engine before atomically replacing the gateway's snapshot pointer.
 type Engine struct {
-	config      Config
-	operations  map[string]Operation
-	diagnostics []Diagnostic
-	query       rego.PreparedEvalQuery
+	config          Config
+	operations      map[string]Operation
+	diagnostics     []Diagnostic
+	valueSelectors  map[string]selector
+	objectSelectors map[string]selector
+	query           rego.PreparedEvalQuery
 }
 
 func New(ctx context.Context, config Config) (*Engine, error) {
@@ -66,7 +65,9 @@ func New(ctx context.Context, config Config) (*Engine, error) {
 	}
 	capabilities.Builtins = builtins
 	capabilities.AllowNet = []string{}
-	opts := []func(*rego.Rego){rego.Query("data.pdp.base.decision"), rego.Module("pdp-base.rego", basePolicy), rego.Module("pdp-custom-base.rego", "package pdp.custom\nimport rego.v1\ndeny contains \"unreachable\" if { false }"), rego.Capabilities(capabilities), rego.StrictBuiltinErrors(true)}
+	// The configuration is written once as data.pdp.config and never changes.
+	store := inmem.NewFromObjectWithOpts(e.policyData(), inmem.OptReturnASTValuesOnRead(true))
+	opts := []func(*rego.Rego){rego.Query("data.pdp.base.decision"), rego.Module("pdp-base.rego", basePolicy), rego.Module("pdp-custom-base.rego", customBase), rego.Store(store), rego.Capabilities(capabilities), rego.StrictBuiltinErrors(true)}
 	for _, name := range sortedKeys(frozen.CustomModules) {
 		source := frozen.CustomModules[name]
 		module, parseErr := ast.ParseModuleWithOpts(name, source, ast.ParserOptions{RegoVersion: ast.RegoV1})
@@ -97,11 +98,6 @@ func (e *Engine) Diagnostics() []Diagnostic {
 	var out []Diagnostic
 	_ = json.Unmarshal(b, &out)
 	return out
-}
-
-type evalUnit struct {
-	ID     string   `json:"id"`
-	Grants []string `json:"grants"`
 }
 
 type unit struct {
@@ -151,68 +147,17 @@ func (e *Engine) Evaluate(ctx context.Context, input Input) (Decision, error) {
 		d.Reasons = append(d.Reasons, err.Error())
 		return d, nil
 	}
-	now := time.Now().UTC()
-	explainedGrants := map[string]bool{}
-	facts := make([]evalUnit, 0, len(units))
+	facts := make([]any, 0, len(units))
 	for _, u := range units {
-		resources, resourceErr := e.resources(input, u)
-		fact := evalUnit{ID: u.operation.ID, Grants: []string{}}
-		if resourceErr != nil {
-			d.DeniedBy = append(d.DeniedBy, "resource_normalization")
-			d.Reasons = append(d.Reasons, resourceErr.Error())
-		}
-		for _, deny := range e.config.Denies {
-			if scopeMatches(deny.Scope, input, u.operation.ID) && e.checkConstraints(deny.Constraints, input, u, resources, now, true) == "" {
-				d.DeniedBy = append(d.DeniedBy, deny.ID)
-				d.Reasons = append(d.Reasons, "explicit deny: "+deny.ID)
-			}
-		}
-		for _, mandatory := range e.config.Mandatory {
-			if scopeMatches(mandatory.Scope, input, u.operation.ID) {
-				if reason := e.constraints(mandatory.Constraints, input, u, resources, now); reason != "" {
-					d.DeniedBy = append(d.DeniedBy, mandatory.ID)
-					d.Reasons = append(d.Reasons, "mandatory restriction "+mandatory.ID+": "+reason)
-				}
-			}
-		}
-		for _, grant := range e.config.Grants {
-			if !scopeMatches(grant.Scope, input, u.operation.ID) || !e.modeMatches(grant, input, u.operation.ID) {
-				continue
-			}
-			if grant.Mode != Full {
-				operation := e.operations[input.Provider+"\x00"+u.operation.ID]
-				if reason := e.constraints(operation.Constraints, input, u, resources, now); reason != "" {
-					d.Reasons = append(d.Reasons, "reviewed operation restriction for "+u.operation.ID+": "+reason)
-					continue
-				}
-			}
-			if reason := e.constraints(grant.Constraints, input, u, resources, now); reason != "" {
-				d.Reasons = append(d.Reasons, "grant "+grant.ID+" rejected for "+u.operation.ID+": "+reason)
-				continue
-			}
-			fact.Grants = append(fact.Grants, grant.ID)
-			d.MatchedGrants = append(d.MatchedGrants, grant.ID)
-			if !explainedGrants[grant.ID] {
-				explainedGrants[grant.ID] = true
-				data, _ := json.Marshal(GrantExplanation{ID: grant.ID, Mode: grant.Mode, Operations: grant.Scope.Operations, Constraints: grant.Constraints})
-				var detail GrantExplanation
-				_ = decodeJSON(data, &detail)
-				d.MatchedGrantDetails = append(d.MatchedGrantDetails, detail)
-			}
-		}
-		if len(fact.Grants) == 0 {
-			d.Reasons = append(d.Reasons, "no grant for operation: "+u.operation.ID)
-		}
+		fact, resources := e.unitFacts(input, u)
 		facts = append(facts, fact)
-		detail := OperationDecision{ID: fact.ID, Resources: resources, MatchedGrants: fact.Grants}
+		detail := OperationDecision{ID: u.operation.ID, Resources: resources, MatchedGrants: []string{}}
 		if u.field != nil {
 			detail.Path = append([]string(nil), u.field.Path...)
 		}
 		d.Operations = append(d.Operations, detail)
 	}
-	d.DeniedBy = unique(d.DeniedBy)
-	d.MatchedGrants = unique(d.MatchedGrants)
-	regoInput["_pdp"] = map[string]any{"units": facts, "denials": d.DeniedBy, "revision": e.Revision(), "now": now.Format(time.RFC3339Nano)}
+	regoInput["_pdp"] = map[string]any{"units": facts, "now_ns": nanos(time.Now()), "revision": e.Revision()}
 	results, err := e.query.Eval(ctx, rego.EvalInput(regoInput))
 	if err != nil {
 		d.Reasons = append(d.Reasons, "policy evaluation failed")
@@ -222,6 +167,7 @@ func (e *Engine) Evaluate(ctx context.Context, input Input) (Decision, error) {
 		d.Reasons = append(d.Reasons, "undefined policy decision")
 		return d, errors.New("undefined policy decision")
 	}
+	// Any unexpected decision shape denies with an error.
 	value, ok := results[0].Expressions[0].Value.(map[string]any)
 	if !ok {
 		return d, errors.New("invalid policy decision shape")
@@ -230,22 +176,72 @@ func (e *Engine) Evaluate(ctx context.Context, input Input) (Decision, error) {
 	if !ok {
 		return d, errors.New("invalid policy allow shape")
 	}
-	custom, ok := value["custom_denials"].([]any)
+	deniedBy, ok := stringItems(value["denied_by"])
 	if !ok {
-		return d, errors.New("custom deny must evaluate to a set of reason strings")
+		return d, errors.New("invalid policy denial shape")
 	}
-	for _, item := range custom {
-		reason, valid := item.(string)
+	reasons, ok := stringItems(value["reasons"])
+	if !ok {
+		return d, errors.New("invalid policy reason shape")
+	}
+	custom, ok := stringItems(value["custom_denials"])
+	if !ok {
+		return d, errors.New("custom deny must contain only reason strings")
+	}
+	unitResults, ok := value["units"].([]any)
+	if !ok || len(unitResults) != len(units) {
+		return d, errors.New("invalid policy unit shape")
+	}
+	matched := map[string]bool{}
+	for i, item := range unitResults {
+		result, valid := item.(map[string]any)
 		if !valid {
-			return d, errors.New("custom deny must contain only reason strings")
+			return d, errors.New("invalid policy unit shape")
 		}
-		d.DeniedBy = append(d.DeniedBy, "custom")
-		d.Reasons = append(d.Reasons, "custom deny: "+reason)
+		grants, valid := stringItems(result["grants"])
+		if !valid {
+			return d, errors.New("invalid policy grant shape")
+		}
+		d.Operations[i].MatchedGrants = unique(grants)
+		for _, id := range grants {
+			matched[id] = true
+		}
 	}
-	d.Allow = allowed && len(d.DeniedBy) == 0
-	d.DeniedBy = unique(d.DeniedBy)
-	d.Reasons = unique(d.Reasons)
+	for _, grant := range e.config.Grants {
+		if !matched[grant.ID] {
+			continue
+		}
+		d.MatchedGrants = append(d.MatchedGrants, grant.ID)
+		data, _ := json.Marshal(GrantExplanation{ID: grant.ID, Mode: grant.Mode, Operations: grant.Scope.Operations, Constraints: grant.Constraints})
+		var detail GrantExplanation
+		_ = decodeJSON(data, &detail)
+		d.MatchedGrantDetails = append(d.MatchedGrantDetails, detail)
+	}
+	for _, reason := range custom {
+		reasons = append(reasons, "custom deny: "+reason)
+	}
+	d.MatchedGrants = unique(d.MatchedGrants)
+	d.DeniedBy = unique(deniedBy)
+	d.Reasons = unique(reasons)
+	d.Allow = allowed
 	return d, nil
+}
+
+// stringItems reads a Rego set or array that must contain only strings.
+func stringItems(value any) ([]string, bool) {
+	items, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		text, valid := item.(string)
+		if !valid {
+			return nil, false
+		}
+		out = append(out, text)
+	}
+	return out, true
 }
 
 func requestUnits(input Input) ([]unit, error) {
@@ -280,22 +276,6 @@ func requestUnits(input Input) ([]unit, error) {
 	return units, nil
 }
 
-func scopeMatches(s Scope, input Input, operation string) bool {
-	return containsOrAll(s.Identities, input.Identity.ID) && containsOrAll(s.Providers, input.Provider) && containsOrAll(s.Bindings, input.Binding) && containsOrAll(s.Operations, operation)
-}
-func (e *Engine) modeMatches(g Grant, input Input, id string) bool {
-	if g.Mode == Full {
-		return true
-	}
-	op, found := e.operations[input.Provider+"\x00"+id]
-	if !found || !op.Reviewed || (op.SchemaDigest != "" && op.SchemaDigest != input.SchemaDigest) {
-		return false
-	}
-	if g.Mode == "" {
-		return len(g.Scope.Operations) > 0
-	}
-	return op.Classification == ReadOperation || (g.Mode == ReadWrite && op.Classification == WriteOperation)
-}
 func containsOrAll(values []string, value string) bool {
 	return len(values) == 0 || contains(values, value)
 }

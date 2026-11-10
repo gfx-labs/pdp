@@ -23,6 +23,8 @@ Copy `examples/minimal.yaml` to a private administrator-owned location. Set the 
 
 ## Permission levels
 
+The policy is [Rego](pkg/policy/base.rego). YAML/JSON supplies its grants, reviewed operations, constraints and optional relationships as immutable `data.pdp.config`. Go authenticates and normalizes requests, then asks OPA for the decision. Grant matching and denial rules are not duplicated in Go. See the [policy model](policies/README.md) for the evaluation contract.
+
 | Mode | Authority |
 | --- | --- |
 | `full` | Supported valid operations on the explicitly scoped identity/provider/binding. A schema is optional. |

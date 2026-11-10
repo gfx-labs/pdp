@@ -6,4 +6,6 @@ Use Go and commit scoped changes. Keep provider credentials out of source, polic
 
 Place Go library packages under `pkg/` so downstream modules can import them. Keep executable entry points under `cmd/`.
 
+Rego owns authorization: grant matching, profiles, constraints, explicit denies, mandatory restrictions and relationship checks. YAML/JSON specifies policy data. Go validates configuration and trusted input, normalizes request facts, invokes OPA and formats explanations. Do not compute authorization candidates or denials in Go for Rego to tally.
+
 Unix peer credentials are a supported authentication mode, not a development bypass. A shared Unix UID is a shared identity. SPIFFE mTLS is optional and must not be required for the minimal deployment.

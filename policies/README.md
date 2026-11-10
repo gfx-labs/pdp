@@ -13,6 +13,19 @@ gfx-labs/pdp and denies issue 2 despite the matching grant.
 
 ## Evaluation
 
+The authorization rules live in [`pkg/policy/base.rego`](../pkg/policy/base.rego),
+embedded into the daemon. YAML/JSON specifies policy data, not a separate policy
+implementation. The loader validates that data and installs an immutable
+normalized document at `data.pdp.config`. Rego evaluates grant scope, profiles,
+reviewed-operation guards, every constraint, explicit denies, mandatory rules
+and optional relationships. It returns the decision and per-occurrence grant
+matches used by `pdp explain`.
+
+Go authenticates the connection, validates the input envelope and extracts
+resources and selector values from normalized requests. It does not decide
+which grants match or precompute denials. Wildcard selectors and exact numeric
+canonicalization remain request normalization, with matching performed in Rego.
+
 - Default is deny. Each normalized REST operation or GraphQL field occurrence
   must match at least one complete grant. Aliases and repeated fields retain
   their individual arguments, including when their coordinates are identical.
@@ -110,7 +123,11 @@ introspection are disabled. Compilation and evaluation failures deny.
 Custom Rego sees the versioned normalized input at its top level, including the
 trusted `identity`, `provider`, `binding`, `schema_digest`, normalized `http`,
 `operations`, and ordered `graphql` occurrence list. `_pdp` is an engine-owned
-facts envelope containing grant candidates, denials, revision and decision time.
+facts envelope containing `units`, `revision` and decision time `now_ns`. Each
+unit has an operation ID, optional field coordinate, extracted resources,
+resource-normalization error and selected `values`/`objects`. Values use canonical
+JSON keys for exact numeric equality. These are request facts, not precomputed
+grants or denials. `_pdp` is an internal contract, not a caller-supplied extension.
 Request content cannot replace those facts. The gateway must never populate
 trusted envelope fields from unauthenticated request metadata.
 Verified identity metadata includes `auth_method`, `spiffe_id` when authenticated

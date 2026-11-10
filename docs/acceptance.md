@@ -117,7 +117,7 @@ make build
 go run ./cmd/pdpbench -pdp ./bin/pdp -requests 1000 -concurrency 4
 ```
 
-The harness starts the actual daemon with kernel UID authentication, one schema-free full grant, embedded OPA, a Starlark OAuth adapter and a loopback TLS upstream. These results do not include pinned-schema normalization, real provider latency or SPIRE processes. The November 9 run at 09:56 UTC produced:
+The harness starts the actual daemon with kernel UID authentication, one schema-free full grant, embedded OPA, a Starlark OAuth adapter and a loopback TLS upstream. These results do not include pinned-schema normalization, real provider latency or SPIRE processes. The November 9 run at 09:56 UTC, before moving grant evaluation from Go into Rego, produced:
 
 | Measurement | Result |
 | --- | --- |
@@ -134,5 +134,38 @@ The harness starts the actual daemon with kernel UID authentication, one schema-
 RSS comes from the daemon's `/proc` data, not the benchmark client. Active RSS is sampled, not an exact allocator high-water mark. Acquisition uses fresh HTTP/1 TLS connections. The separate invalidation/reacquisition check adds two exchanges outside the daemon's single-exchange count. A zero observed idle CPU count is a measurement-resolution result, not a guarantee of zero CPU consumption. Provider refresh latency, schema-restricted workload costs, SPIRE server/agent resource use and installed deployment measurements remain pending.
 
 Final local verification also passed the uncached race suite, vet, build, all eight offline configuration examples, the checked-in explanation and both structured catalogs. `go mod verify` verified all modules, and `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` reported no vulnerabilities on November 9, 2026. These are point-in-time results, not a substitute for later dependency scans.
+
+### Rego authorization migration, November 10, 2026
+
+The migrated source embeds `pkg/policy/base.rego` as the authorization policy and
+loads YAML/JSON configuration as `data.pdp.config`. Go no longer supplies matched
+grants or denials. The unchanged full race suite, vet and build passed. An
+isolated old/new comparison matched all 1,296 tested decisions across profiles,
+grant/deny/mandatory constraints, resource scopes, object shapes and numeric
+values. That comparison remained outside the repository. All nine current
+configuration examples and 20 GitHub/Linear request cases passed against real
+local Unix/TLS connections. Denied requests did not acquire credentials or reach
+the local upstream. Existing security regressions remain, with no migration
+scaffolding tests committed. This does not establish real-provider acceptance.
+
+The same benchmark command on the migrated working tree at 07:37 UTC, using
+the same Go version, hardware, schema-free policy and local upstream, produced:
+
+| Measurement | Rego authorization result |
+| --- | --- |
+| Idle gateway RSS | 31,188 KiB, approximately 30.5 MiB |
+| Sampled active peak RSS | 39,748 KiB, approximately 38.8 MiB |
+| Idle process CPU over 1.000 seconds | 0 observed CPU ticks, with 10 ms tick resolution |
+| Active process CPU / elapsed time | 1,860 ms / 1,048.2 ms |
+| Warm request p50 / p95 / p99 | 3.927 / 6.047 / 7.140 ms |
+| Cold request including local token acquisition | 7.616 ms |
+| Separate local client-credentials reacquisition | 2.494 ms |
+| Warm requests / client concurrency | 1,000 / 4 |
+| Daemon credential exchanges | 1, including the cold request |
+
+These single-run measurements show additional evaluation cost rather than a
+claim that moving rules into Rego is free. They are not a controlled performance
+comparison, a schema-restricted workload measurement or a production latency
+target.
 
 For subsequent measurements, record the binary revision, Go version, selected schema/policy sizes, request mix, concurrency and hardware. Measure gateway idle RSS/CPU, warm authorized-request latency, acquisition/refresh latency and active memory separately. Use sanitized credential and gateway counters to distinguish cached requests from refreshes. Measure SPIRE server and agent separately when deployed. Keep the tested boundary and external gaps explicit.

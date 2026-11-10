@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"reflect"
 	"strings"
-	"time"
 )
+
+// This file only extracts facts from a normalized request. The embedded Rego
+// policy decides what those facts are allowed to do.
 
 func (e *Engine) resources(input Input, u unit) ([]Resource, error) {
 	resources, err := e.directResources(input, u)
@@ -103,170 +104,6 @@ func (e *Engine) directResources(input Input, u unit) ([]Resource, error) {
 	return resources, nil
 }
 
-func (e *Engine) constraints(c Constraints, input Input, u unit, resources []Resource, now time.Time) string {
-	return e.checkConstraints(c, input, u, resources, now, false)
-}
-
-func (e *Engine) checkConstraints(c Constraints, input Input, u unit, resources []Resource, now time.Time, deny bool) string {
-	if len(c.SchemaDigests) > 0 && !contains(c.SchemaDigests, input.SchemaDigest) {
-		return "schema digest not allowed"
-	}
-	for _, restriction := range []struct {
-		kind string
-		ids  []string
-	}{{"repository", c.Repositories}, {"issue", c.Issues}} {
-		if len(restriction.ids) == 0 {
-			continue
-		}
-		found, matched := false, false
-		for _, resource := range resources {
-			if resource.Type != restriction.kind {
-				continue
-			}
-			found = true
-			if contains(restriction.ids, resource.ID) {
-				matched = true
-			} else if !deny {
-				return restriction.kind + " outside allowed list"
-			}
-		}
-		if !found || !matched {
-			return restriction.kind + " not present in allowed list"
-		}
-	}
-	if len(c.Resources) > 0 {
-		matched := false
-		for _, resource := range resources {
-			allowed := false
-			for _, candidate := range c.Resources {
-				if candidate == resource {
-					allowed = true
-					matched = true
-					break
-				}
-			}
-			if !allowed && !deny {
-				return "resource outside allowed list"
-			}
-		}
-		if len(resources) == 0 || !matched {
-			return "no matching resource"
-		}
-	}
-	for _, constraint := range c.Values {
-		if constraint.Field != "" && (u.field == nil || constraint.Field != u.field.Coordinate) {
-			if deny {
-				return "field constraint does not apply"
-			}
-			continue
-		}
-		values := selectValues(input, u, constraint.Source, constraint.Path, constraint.Field)
-		if len(values) == 0 {
-			return "required request value missing"
-		}
-		matched := false
-		for _, value := range values {
-			if value == nil {
-				if deny {
-					continue
-				}
-				return "required request value missing"
-			}
-			allowed := false
-			for _, candidate := range constraint.Values {
-				if equalJSON(value, candidate) {
-					allowed = true
-					matched = true
-					break
-				}
-			}
-			if !allowed && !deny {
-				return "request value outside allowed list"
-			}
-		}
-		if !matched {
-			return "request value outside allowed list"
-		}
-	}
-	for _, constraint := range c.Objects {
-		if constraint.Field != "" && (u.field == nil || constraint.Field != u.field.Coordinate) {
-			if deny {
-				return "object field constraint does not apply"
-			}
-			continue
-		}
-		values := selectRequestValues(input, u, constraint.Source, constraint.Path, constraint.Field, false)
-		matched := false
-		for _, value := range values {
-			reason := objectRestriction(constraint, value)
-			if reason == "" {
-				matched = true
-			} else if !deny {
-				return reason
-			}
-		}
-		if !matched {
-			return "required constrained object missing or invalid"
-		}
-	}
-	if c.Relationship != nil {
-		return e.relationship(*c.Relationship, input, resources, now)
-	}
-	return ""
-}
-
-func objectRestriction(constraint ObjectConstraint, value any) string {
-	object, ok := value.(map[string]any)
-	if !ok {
-		return "required request object missing"
-	}
-	for key := range object {
-		if !contains(constraint.AllowedKeys, key) {
-			return "request object contains a forbidden key"
-		}
-	}
-	for _, key := range constraint.RequiredStringKeys {
-		text, ok := object[key].(string)
-		if !ok || strings.TrimSpace(text) == "" {
-			return "request object requires nonempty string keys"
-		}
-	}
-	return ""
-}
-
-func equalJSON(a, b any) bool {
-	switch value := a.(type) {
-	case json.Number:
-		other, ok := b.(json.Number)
-		return ok && canonicalNumber(value) == canonicalNumber(other)
-	case []any:
-		other, ok := b.([]any)
-		if !ok || len(value) != len(other) {
-			return false
-		}
-		for i := range value {
-			if !equalJSON(value[i], other[i]) {
-				return false
-			}
-		}
-		return true
-	case map[string]any:
-		other, ok := b.(map[string]any)
-		if !ok || len(value) != len(other) {
-			return false
-		}
-		for key, item := range value {
-			candidate, found := other[key]
-			if !found || !equalJSON(item, candidate) {
-				return false
-			}
-		}
-		return true
-	default:
-		return reflect.DeepEqual(a, b)
-	}
-}
-
 // Normalize decimal coefficient and exponent without materializing 10^exponent.
 func canonicalNumber(number json.Number) string {
 	text := number.String()
@@ -304,50 +141,6 @@ func numericResourceID(number json.Number) (string, error) {
 		return "", fmt.Errorf("numeric resource ID must be an integer of at most 1024 digits")
 	}
 	return canonical[:at] + strings.Repeat("0", int(exponent.Int64())), nil
-}
-
-func (e *Engine) relationship(requirement RelationshipRequirement, input Input, resources []Resource, now time.Time) string {
-	snapshot := e.config.Relationships
-	if snapshot == nil {
-		return "required relationship snapshot missing"
-	}
-	if snapshot.IssuedAt.After(now) || !snapshot.ExpiresAt.After(now) || now.Sub(snapshot.IssuedAt) > snapshot.MaxAge {
-		return "required relationship snapshot expired or stale"
-	}
-	if input.Identity.TaskID == "" {
-		return "task selection is required"
-	}
-	member := false
-	for _, edge := range snapshot.IdentityTasks {
-		if edge.Identity == input.Identity.ID && edge.Task == input.Identity.TaskID && edge.ExpiresAt.After(now) {
-			member = true
-			break
-		}
-	}
-	if !member {
-		return "task selection is not authorized for identity"
-	}
-	checked := 0
-	for _, resource := range resources {
-		if !containsOrAll(requirement.ResourceTypes, resource.Type) {
-			continue
-		}
-		checked++
-		allowed := false
-		for _, edge := range snapshot.TaskResources {
-			if edge.Task == input.Identity.TaskID && edge.Resource == resource && edge.Permission == requirement.Permission && edge.ExpiresAt.After(now) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return "task lacks active resource permission"
-		}
-	}
-	if checked == 0 {
-		return "relationship requires an identified resource"
-	}
-	return ""
 }
 
 func selectValues(input Input, u unit, source string, path []string, field string) []any {
