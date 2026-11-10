@@ -21,6 +21,7 @@ credentials:
       secrets:
         token:
           file: /run/secrets/github-token
+# Policy data evaluated by pkg/policy/base.rego; see examples/policy.md.
 policy:
   grants:
     - id: approved-github-full

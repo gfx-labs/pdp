@@ -2,10 +2,13 @@
 
 These walkthroughs pair the checked-in configurations with caller requests. Run commands from the repository root. No caller command needs a GitHub token, Linear token, App private key or OAuth client secret.
 
+**Rego is the policy; YAML specifies its data.** Every `policy:` section is loaded into immutable `data.pdp.config` for [the embedded authorization rules](../pkg/policy/base.rego). Go validates configuration and normalizes requests, not grant decisions. Read the [YAML-to-Rego walkthrough](policy.md) for the actual rule path, input contract and a runnable custom Rego denial. Existing YAML fields and provider request bodies did not change in the migration.
+
 | Use case | Walkthrough | Configuration |
 | --- | --- | --- |
 | Read one GitHub repository and its issues | [GitHub](github.md#read-a-repository-and-issue) | [github-read.yaml](github-read.yaml) |
 | Comment on an approved GitHub repository's issue | [GitHub](github.md#allow-approved-issue-comments) | [github-read-write.yaml](github-read-write.yaml) |
+| Override an allowed GitHub comment with a custom Rego denial | [Policy walkthrough](policy.md#run-a-custom-rego-denial) | [github-comment-freeze.yaml](github-comment-freeze.yaml) |
 | Read approved Linear issues | [Linear](linear.md#read-an-approved-issue) | [linear-read.yaml](linear-read.yaml) |
 | Comment on approved Linear issues | [Linear](linear.md#allow-comments-on-approved-issues) | [linear-read-write.yaml](linear-read-write.yaml) |
 | Reuse an existing Linear OAuth installation | [Linear](linear.md#use-an-existing-oauth-installation) | [linear-oauth.yaml](linear-oauth.yaml) |
@@ -17,13 +20,20 @@ These walkthroughs pair the checked-in configurations with caller requests. Run 
 make build
 bin/pdp validate --config examples/github-read.yaml
 bin/pdp validate --config examples/github-read-write.yaml
+bin/pdp validate --config examples/github-comment-freeze.yaml
 bin/pdp validate --config examples/linear-read.yaml
 bin/pdp validate --config examples/linear-read-write.yaml
 bin/pdp validate --config examples/github-app.yaml
 bin/pdp validate --config examples/linear-oauth.yaml
+bin/pdp validate --config examples/minimal.yaml
+bin/pdp validate --config examples/kubernetes/pdp.yaml
+CREDENTIALS_DIRECTORY=/run/credentials/pdp.service \
+  bin/pdp validate --config examples/systemd/pdp.yaml
 ```
 
 Validation imports schemas and compiles authorization and adapters. It does not read provider credentials, obtain tokens or contact either provider. Placeholders are accepted for offline review, not evidence that an account is configured.
+
+`explain-full.json` is an administrator-supplied normalized input, not a caller authentication mechanism. The request JSON files remain ordinary provider payloads. Neither includes grants, denials or `_pdp` facts: the engine constructs trusted facts and Rego determines the outcome.
 
 ## Set up the identity boundary
 

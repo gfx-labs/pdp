@@ -28,6 +28,7 @@ go build -o pdp ./cmd/pdp
 ./pdp validate --config examples/minimal.yaml
 ./pdp validate --config examples/github-read.yaml
 ./pdp validate --config examples/github-read-write.yaml
+./pdp validate --config examples/github-comment-freeze.yaml
 ./pdp validate --config examples/linear-read.yaml
 ./pdp validate --config examples/linear-read-write.yaml
 ./pdp validate --config examples/github-app.yaml
@@ -35,9 +36,20 @@ go build -o pdp ./cmd/pdp
 ./pdp validate --config examples/kubernetes/pdp.yaml
 CREDENTIALS_DIRECTORY=/run/credentials/pdp.service \
   ./pdp validate --config examples/systemd/pdp.yaml
+./pdp explain --config examples/github-read-write.yaml \
+  --input examples/explain-github-comment-freeze.json
+./pdp explain --config examples/github-comment-freeze.yaml \
+  --input examples/explain-github-comment-freeze.json
 ```
 
-The systemd-credential environment supplies context for reference validation, not secret content. The Kubernetes config's offline validation does not open the Workload API. Run `TestCLISocketReload` alone to reproduce CLI acceptance without creating a real provider credential:
+The systemd-credential environment supplies context for reference validation, not secret content. The Kubernetes config's offline validation does not open the Workload API.
+
+The two comment explanations use the same trusted input. The first allows it;
+the comment-freeze custom Rego module denies it while retaining the matched
+grant in the explanation. Both commands are offline and execute no writes.
+
+Run `TestCLISocketReload` alone to reproduce CLI acceptance without creating a
+real provider credential:
 
 ```sh
 go test -race -count=1 -run '^TestCLISocketReload$' -v ./cmd/pdp

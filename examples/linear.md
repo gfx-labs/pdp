@@ -2,6 +2,8 @@
 
 Follow the [shared identity and socket setup](README.md#set-up-the-identity-boundary) first. These configurations use direct issue allowlists, without custom Rego, task records or relationship services. Caller requests always use `/upstreams/linear/graphql`; the caller cannot select a workspace credential or destination.
 
+The YAML supplies data to the embedded [Rego policy](../pkg/policy/base.rego). Rego evaluates the profile, the issue allowlist, reviewed input-shape restrictions and every selected field occurrence. Go parses and validates GraphQL and extracts request facts; it does not make grant decisions. See the [YAML-to-Rego walkthrough](policy.md). The ordinary profiles do not need custom modules.
+
 ## Read an approved issue
 
 Start with [linear-read.yaml](linear-read.yaml), the read-only app-actor client-credentials configuration. Prepare an approved Linear OAuth app for this flow, replace `REPLACE_CLIENT_ID`, and mount its client secret at `/run/secrets/linear-client-secret` for the daemon alone. Use this flow only when app-actor client credentials are the intended integration. An existing user-authorized installation is not interchangeable with it; see [refresh installations](#use-an-existing-oauth-installation).
@@ -24,7 +26,7 @@ bin/pdp request --socket "$PDP_SOCKET" --method POST \
   --body examples/requests/linear/read-issue.json
 ```
 
-The request selects `id`, `identifier`, `title` and `description` using a typed variable and explicit `operationName`. PDP resolves the schema coordinates and arguments, checks the issue scope and injects the app's credential only after allow. No secret appears in the body or caller command. Edit JSON files directly or generate prepared copies: shell variables are not interpolated inside the supplied files.
+The request selects `id`, `identifier`, `title` and `description` using a typed variable and explicit `operationName`. Go resolves the schema coordinates and arguments, then Rego checks the issue scope for every occurrence. PDP injects the app's credential only after allow. No secret appears in the body or caller command. Edit JSON files directly or generate prepared copies: shell variables are not interpolated inside the supplied files.
 
 Inspect the provider's JSON `data` and `errors`, not just HTTP status. Successful HTTP transport does not establish a successful GraphQL operation or the intended provider actor.
 

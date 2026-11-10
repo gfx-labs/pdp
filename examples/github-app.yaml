@@ -1,4 +1,4 @@
-# Full gateway policy, restricted GitHub App installation authority.
+# Full gateway grant data, restricted GitHub App installation authority.
 # Replace UID, app/installation IDs and numeric repository ID before serving.
 # The mounted RSA PEM is read only after authorization, never by validate.
 version: pdp.config/v1
@@ -31,6 +31,7 @@ credentials:
         permissions:
           contents: read
           issues: write
+# Policy data evaluated by pkg/policy/base.rego; see examples/policy.md.
 policy:
   grants:
     - id: local-github-app-full

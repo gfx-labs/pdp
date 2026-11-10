@@ -1,4 +1,4 @@
-# Full gateway policy for an existing Linear authorization-code installation.
+# Full gateway grant data for an existing Linear authorization-code installation.
 # This is a rotating refresh flow, not the client_credentials automation grant.
 # The original authorization must use actor=app and the exact scopes below.
 # Replace UID and client ID. Provision the client secret outside this file.
@@ -36,6 +36,7 @@ credentials:
           file: /run/secrets/linear-client-secret
       state_file: /var/lib/pdp/linear-oauth/state.json
       scopes: [read, comments:create]
+# Policy data evaluated by pkg/policy/base.rego; see examples/policy.md.
 policy:
   grants:
     - id: local-linear-installation-full

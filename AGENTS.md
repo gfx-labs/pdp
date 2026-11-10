@@ -8,4 +8,6 @@ Place Go library packages under `pkg/` so downstream modules can import them. Ke
 
 Rego owns authorization: grant matching, profiles, constraints, explicit denies, mandatory restrictions and relationship checks. YAML/JSON specifies policy data. Go validates configuration and trusted input, normalizes request facts, invokes OPA and formats explanations. Do not compute authorization candidates or denials in Go for Rego to tally.
 
+Policy architecture and configuration changes include every affected example and provider walkthrough. Show the YAML-to-Rego relationship explicitly and validate the documented examples through the CLI, not only the underlying engine tests.
+
 Unix peer credentials are a supported authentication mode, not a development bypass. A shared Unix UID is a shared identity. SPIFFE mTLS is optional and must not be required for the minimal deployment.

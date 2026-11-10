@@ -35,6 +35,7 @@ credentials:
         permissions:
           contents: read
           issues: write
+# Policy data evaluated by pkg/policy/base.rego; see examples/policy.md.
 policy:
   grants:
     - id: approved-repository-read-comment

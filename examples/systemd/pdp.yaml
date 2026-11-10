@@ -20,6 +20,7 @@ credentials:
       secrets:
         token:
           systemd_credential: github-token
+# Policy data evaluated by pkg/policy/base.rego; see examples/policy.md.
 policy:
   grants:
     - id: local-github-full

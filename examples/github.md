@@ -2,6 +2,8 @@
 
 Follow the [shared identity and socket setup](README.md#set-up-the-identity-boundary) first. These examples need no SPIRE, custom Rego or relationship graph. Commands assume the prepared daemon is listening at `/run/pdp/pdp.sock` and the caller UID is mapped to `local-worker`.
 
+All grants below are YAML data for the embedded [Rego policy](../pkg/policy/base.rego), not authorization logic implemented in Go. Rego matches the verified identity/provider/binding, evaluates the reviewed operation profile and checks the repository allowlist. The [YAML-to-Rego walkthrough](policy.md) shows the actual rule path and a runnable custom-denial example. No custom module is required for the ordinary profiles.
+
 ## Read a repository and issue
 
 Use [github-read.yaml](github-read.yaml). Configure:
@@ -33,7 +35,7 @@ bin/pdp request --socket "$PDP_SOCKET" \
   --path "/upstreams/github/repos/$PDP_REPOSITORY/issues/$PDP_ISSUE_NUMBER/comments?per_page=10"
 ```
 
-PDP validates the pinned REST operation, checks the repository grant, obtains the token only after allow, removes `/upstreams/github`, then injects authorization for the fixed GitHub endpoint. The caller gets the provider JSON, not the token.
+Go validates the pinned REST operation and extracts its canonical repository resource. Rego checks the grant and returns the decision. Only after allow does PDP obtain the token, remove `/upstreams/github` and inject authorization for the fixed GitHub endpoint. The caller gets the provider JSON, not the token.
 
 Expected restrictions:
 
@@ -74,6 +76,8 @@ bin/pdp request --socket "$PDP_SOCKET" --method POST \
 ```
 
 This same request must deny under `github-read.yaml`, and a comment targeting another repository must deny under `github-read-write.yaml`. No comment command in this guide has been executed against GitHub. Do not automatically retry uncertain writes or delete the resulting comment without separate cleanup approval.
+
+For an additional Rego restriction, [github-comment-freeze.yaml](github-comment-freeze.yaml) keeps the same read/write grant data but adds a custom denial for `issues/create-comment`. Reads remain allowed; the custom denial overrides the matching grant. Verify that behavior without credentials or provider calls using the [offline explanation](policy.md#run-a-custom-rego-denial).
 
 ## Credential shielding with full access
 

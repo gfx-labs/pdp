@@ -33,6 +33,7 @@ credentials:
         client_secret:
           file: /run/secrets/linear-client-secret
       scopes: [read, comments:create]
+# Policy data evaluated by pkg/policy/base.rego; see examples/policy.md.
 policy:
   grants:
     - id: approved-issues-read-comment

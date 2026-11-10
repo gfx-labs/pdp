@@ -1,9 +1,9 @@
 # Policy examples and security model
 
-`direct.json` is a minimum policy configuration. It grants one trusted identity
-full access to one provider binding. It needs no operation registry, schema
-coverage, task graph or custom Rego. The gateway still validates any configured
-schema and controls the provider endpoint and credentials.
+`direct.json` is minimum policy data. The embedded Rego rules use it to grant one
+trusted identity full access to one provider binding. It needs no operation
+registry, schema coverage, task graph or custom Rego. The gateway still validates
+any configured schema and controls the provider endpoint and credentials.
 
 `restricted.json` demonstrates reviewed operation classification, schema pinning,
 direct repository and issue allowlists, mandatory restrictions and explicit deny.
@@ -119,6 +119,12 @@ revisions.
 An `allow` rule cannot grant authority or bypass a base restriction. Custom code
 cannot replace the embedded policy namespace. Network builtins and runtime
 introspection are disabled. Compilation and evaluation failures deny.
+
+For a complete YAML configuration with inline custom Rego and paired allow/deny
+explanations, see the [comment-freeze example](../examples/policy.md#run-a-custom-rego-denial).
+The JSON files here contain policy data, not Rego modules; use the full YAML
+examples with the CLI rather than passing these policy-only JSON documents as
+daemon configurations.
 
 Custom Rego sees the versioned normalized input at its top level, including the
 trusted `identity`, `provider`, `binding`, `schema_digest`, normalized `http`,
