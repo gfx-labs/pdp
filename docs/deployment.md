@@ -1,19 +1,22 @@
 # Deployment
 
-The files under `examples/packs/systemd` and `examples/packs/github-spiffe` are templates. Nothing in this repository creates accounts, copies secrets, installs units, registers SPIFFE identities or applies Kubernetes resources. Tests validate the two packs offline and run the Unix transport, socket activation and a local Workload API server. No SPIRE server, systemd installation or Kubernetes cluster has been used.
+The files under `examples/packs/systemd` and `examples/packs/github-spiffe` are templates. Nothing in this repository creates accounts, copies secrets, installs units, registers SPIFFE identities, issues an interception CA or applies Kubernetes resources. Tests validate the two packs offline and run the Unix transport, socket activation, a local Workload API server, a generated interception CA, a transparent TLS listener and a local DNS server. No SPIRE server, systemd installation, Kubernetes cluster, cert-manager or trust-manager has been used.
 
 ## What the outer boundary is
 
 Go authenticates and does nothing else with the result:
 
 - **Unix socket.** The kernel peer UID of the connection becomes `input.identity` with `id` `uid:<n>`, `auth_method` `unix` and `uid`.
-- **SPIFFE mTLS.** The client certificate is verified against the current Workload API bundle on every request, including reused connections. The verified ID becomes `input.identity` with `auth_method` `spiffe` and `spiffe_id`.
+- **SPIFFE mTLS.** The client certificate is verified against the current Workload API bundle on every request, including reused connections and requests inside an open `CONNECT`. The verified ID becomes `input.identity` with `auth_method` `spiffe` and `spiffe_id`.
+- **Transparent listeners.** The source address becomes `input.identity` with `id` `ip:<address>`, `auth_method` `transparent` and `ip`. Nothing else about the caller is known.
 
-PDP does not map these identities to principals and does not hold an allowlist. Any local UID that can open the socket, and any workload in a trusted SPIFFE domain, reaches policy. Default deny in Rego then refuses the ones the policy does not name, with `403`. Earlier versions answered `401` to an unmapped caller. The outer boundary is therefore the socket's file permissions and the trust bundle. Treat both as part of the access control, and name exact UIDs or SPIFFE IDs in `policy.rego`.
+PDP does not map these identities to principals and does not hold an allowlist of callers or destinations. Any local UID that can open the socket, any workload in a trusted SPIFFE domain and any address that reaches a transparent listener reaches policy. Default deny in Rego then refuses the ones the policy does not name, with `403`. Earlier versions answered `401` to an unmapped caller. The outer boundary is therefore the socket's file permissions, the trust bundle and the network in front of the transparent listeners. Treat all three as part of the access control, and name exact UIDs, SPIFFE IDs or addresses in `policy.rego`.
+
+PDP only controls traffic sent to it. A workload with a direct route out can bypass it. Block direct egress with a firewall, a network namespace or a Kubernetes `NetworkPolicy` that allows only PDP and DNS.
 
 ## Unix isolation
 
-Use a daemon account distinct from every credentialless workload account. Only the daemon account should read mounted provider secrets or writable OAuth token state. A caller that shares the daemon's UID can usually read those files directly, whatever the policy says. A private socket alone does not separate processes with the same UID. `SO_PEERCRED` supplies the kernel UID, not a unit or session. A UID shared by several sandboxes is one identity and gives no per-session isolation. PID, systemd unit names, cgroups and environment labels are not identities.
+Use a daemon account distinct from every credentialless workload account. Only the daemon account should read mounted provider secrets, writable OAuth token state or the interception CA key. A caller that shares the daemon's UID can usually read those files directly, whatever the policy says. A private socket alone does not separate processes with the same UID. `SO_PEERCRED` supplies the kernel UID, not a unit or session. A UID shared by several sandboxes is one identity and gives no per-session isolation. PID, systemd unit names, cgroups and environment labels are not identities.
 
 The socket's parent must exist, be owned by the daemon or root, and not be group or world writable. Parent symlinks are rejected. Use `/run/pdp/pdp.sock` or a private administrator-managed directory, never `/tmp/pdp.sock`. No caller identity header is trusted. Headers are not passed to policy.
 
@@ -70,6 +73,26 @@ Primary library and workload references:
 - <https://github.com/spiffe/go-spiffe>
 - <https://spiffe.io/docs/latest/deploying/configuring/>
 
+## Interception CA
+
+An `interception` section is needed for `CONNECT` to anything but a tunnel upstream, and for the transparent HTTPS listener. Absolute-form requests, including `pdp request --url`, do not need it.
+
+- Issue a CA certificate with the certificate-signing key usage. Put it, followed by any intermediates below the root, in `certificate_file`, and its key in `key_file`.
+- Make both files readable by the daemon account only. Anyone with the key can impersonate any host the CA permits to every workload that trusts it. Prefer a dedicated CA with name constraints limited to the hosts PDP should intercept, and check that the workloads' TLS libraries enforce name constraints.
+- Install the root in the workloads' trust store, or point `SSL_CERT_FILE` or the runtime's equivalent at a bundle that contains it.
+- PDP rechecks the files at most once a minute and reloads them when their modification time changes. Replace both files when renewing. A changed path in `interception` needs a restart.
+
+`pdp validate` does not open the CA files. A missing or invalid CA makes `pdp serve` exit at startup.
+
+## DNS steering
+
+For clients that cannot be configured with a proxy, set `transport.transparent` and `dns`. Point the workloads' resolver at `dns.listen`. Only `upstreams` hosts and `dns.intercept` patterns resolve to `dns.address`. Other names are forwarded to `dns.resolver` or refused.
+
+- Binding port 53, 80 or 443 needs the `CAP_NET_BIND_SERVICE` capability or a port above 1024 with a redirect in front. The `systemd` pack does not grant it.
+- DNS is UDP only. A client that falls back to TCP for a large answer gets nothing from PDP.
+- The transparent listeners identify callers by source address. Run them only on a network where addresses cannot be spoofed by workloads, and name the addresses in policy.
+- Whether steering and interception cover every connection a given client makes has not been tested with any real client.
+
 ## Kubernetes and service-account attestation
 
 `examples/packs/github-spiffe/deployment.yaml` holds a ServiceAccount, a Deployment and a Service. It requires:
@@ -78,6 +101,8 @@ Primary library and workload references:
 - installed SPIRE server and agents and the SPIFFE CSI driver
 - a `pdp-config` ConfigMap holding `pdp.json`, `policy.rego`, `adapter.star` and `github-rest.json`, because `pdp.json` names all four
 - a `pdp-provider-credentials` Secret with the token at the path `pdp.json` names
+
+The manifest has no interception CA, DNS steering or `NetworkPolicy`. For a cluster setup with cert-manager and trust-manager see [forward-proxy.md](forward-proxy.md#kubernetes-and-cert-manager). That setup has not been tried.
 
 Replace the deliberately invalid image with an approved immutable digest. The CSI volume mounts the Workload API without a hostPath. The Secret is read-only and the container filesystem is read-only. The example uses a static mounted token. A refresh installation also needs a private, durable, daemon-writable state volume, not a read-only Secret.
 
@@ -94,4 +119,4 @@ Primary references:
 
 ## Later Jobshop integration
 
-No Jobshop configuration is included. A future integration should expose only the gateway socket or mTLS endpoint to a sandbox, never provider secrets or OAuth state. A Unix integration needs verified distinct UIDs and socket-group access. A SPIFFE integration needs narrowly selected Workload API access and registered workload identities. Do not claim session isolation from PID, systemd unit names, cgroups or environment labels until the attestor verifies those selectors. Confirm that the intended sandbox reaches the gateway and that a neighboring sandbox with another identity gets `403`. Measure daemon and SPIRE resource use separately.
+No Jobshop configuration is included. A future integration should expose only the gateway socket or mTLS endpoint to a sandbox, never provider secrets, OAuth state or the interception CA key. A Unix integration needs verified distinct UIDs and socket-group access. A SPIFFE integration needs narrowly selected Workload API access and registered workload identities. Do not claim session isolation from PID, systemd unit names, cgroups or environment labels until the attestor verifies those selectors. Confirm that the intended sandbox reaches the gateway and that a neighboring sandbox with another identity gets `403`. Measure daemon and SPIRE resource use separately.
