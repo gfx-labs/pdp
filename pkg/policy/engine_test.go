@@ -3,7 +3,9 @@ package policy_test
 import (
 	"context"
 	"encoding/json"
-	"os"
+	"errors"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,24 +13,26 @@ import (
 	"github.com/gfx-labs/pdp/pkg/policy"
 )
 
-func scope() policy.Scope {
-	return policy.Scope{Identities: []string{"uid:1000"}, Providers: []string{"github"}, Bindings: []string{"work"}}
-}
-func full() policy.Grant { return policy.Grant{ID: "direct", Scope: scope(), Mode: policy.Full} }
 func request() policy.Input {
-	return policy.Input{Version: policy.InputVersion, Identity: policy.Identity{ID: "uid:1000"}, Provider: "github", Binding: "work", HTTP: policy.HTTPInput{Method: "POST", Path: "/api"}, Operations: []policy.OperationInput{{ID: "getIssue"}}}
-}
-func engine(t *testing.T, c policy.Config) *policy.Engine {
-	t.Helper()
-	if c.Revision == "" {
-		c.Revision = "test-r1"
+	return policy.Input{
+		Version: policy.InputVersion, Identity: policy.Identity{ID: "worker"},
+		Provider: "github", Binding: "installation", SchemaDigest: "sha256:reviewed",
+		HTTP:       policy.HTTPInput{Method: "POST", Path: "/api"},
+		Operations: []policy.OperationInput{{ID: "issues/get"}},
 	}
-	e, err := policy.New(context.Background(), c)
+}
+
+func engine(t *testing.T, source string, data map[string]any) *policy.Engine {
+	t.Helper()
+	e, err := policy.New(context.Background(), policy.Config{
+		Revision: "test-r1", Modules: map[string]string{"authz.rego": "package pdp.authz\n" + source}, Data: data,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return e
 }
+
 func decide(t *testing.T, e *policy.Engine, in policy.Input, want bool) policy.Decision {
 	t.Helper()
 	d, err := e.Evaluate(context.Background(), in)
@@ -38,487 +42,312 @@ func decide(t *testing.T, e *policy.Engine, in policy.Input, want bool) policy.D
 	if d.Allow != want {
 		t.Fatalf("allow=%v want=%v: %+v", d.Allow, want, d)
 	}
-	if d.Revision != e.Revision() {
-		t.Fatalf("decision revision mismatch: %+v", d)
-	}
 	return d
 }
 
-// Owns the direct-grant security boundary: classification must be reviewed and
-// transport verbs, identity drift and unknown operations cannot widen authority.
-func TestDirectModesAndTrustedEnvelope(t *testing.T) {
-	operations := []policy.Operation{
-		{ID: "getIssue", Provider: "github", Classification: policy.ReadOperation, Reviewed: true},
-		{ID: "editIssue", Provider: "github", Classification: policy.WriteOperation, Reviewed: true},
-		{ID: "deleteIssue", Provider: "github", Classification: policy.DestructiveOperation, Reviewed: true},
-		{ID: "adminIssue", Provider: "github", Classification: policy.AdminOperation, Reviewed: true},
-		{ID: "unreviewed", Provider: "github", Classification: policy.ReadOperation},
-		{ID: "pinned", Provider: "github", SchemaDigest: "sha256:reviewed", Classification: policy.ReadOperation, Reviewed: true},
-	}
-	for _, mode := range []policy.Mode{policy.Full, policy.Read, policy.ReadWrite} {
-		t.Run(string(mode), func(t *testing.T) {
-			g := full()
-			g.Mode = mode
-			e := engine(t, policy.Config{Grants: []policy.Grant{g}, Operations: operations})
-			for _, op := range []string{"getIssue", "editIssue", "deleteIssue", "adminIssue", "unreviewed", "unknown", "pinned"} {
-				in := request()
-				in.Operations[0].ID = op
-				in.HTTP.Method = "GET"
-				want := mode == policy.Full || op == "getIssue" || (mode == policy.ReadWrite && op == "editIssue")
-				decide(t, e, in, want)
-			}
-			in := request()
-			in.SchemaDigest = "sha256:reviewed"
-			in.Operations[0].ID = "pinned"
-			decide(t, e, in, true)
-		})
-	}
-	decide(t, engine(t, policy.Config{}), request(), false)
-	e := engine(t, policy.Config{Grants: []policy.Grant{full()}})
-	for _, mutate := range []func(*policy.Input){func(i *policy.Input) { i.Version = "v2" }, func(i *policy.Input) { i.Identity.ID = "uid:2" }, func(i *policy.Input) { i.Provider = "linear" }, func(i *policy.Input) { i.Binding = "other" }, func(i *policy.Input) { i.Operations = nil }} {
-		in := request()
-		mutate(&in)
-		decide(t, e, in, false)
-	}
-}
-
-func TestConjunctiveGrantsAndDenyOverrides(t *testing.T) {
-	g := full()
-	g.Constraints = policy.Constraints{Repositories: []string{"repo-a"}, Issues: []string{"issue-a"}}
-	other := full()
-	other.ID = "other"
-	other.Constraints = policy.Constraints{Repositories: []string{"repo-b"}, Issues: []string{"issue-b"}}
-	e := engine(t, policy.Config{Grants: []policy.Grant{g, other}})
+// Authored source, not Go-side operation classifications, owns permissions.
+func TestAuthoredFullAndRestrictedPolicies(t *testing.T) {
+	full := engine(t, `
+		default allow := false
+		allow if {
+			input.identity.id == "worker"
+			input.provider == "github"
+			input.binding == "installation"
+		}
+		matched_rules contains "full-access" if allow
+	`, nil)
 	in := request()
-	in.Operations[0].Resources = []policy.Resource{{Type: "repository", ID: "repo-a"}, {Type: "issue", ID: "issue-b"}}
-	decide(t, e, in, false)
-	in.Operations[0].Resources[1].ID = "issue-a"
-	decide(t, e, in, true)
-	if len(e.Diagnostics()) == 0 {
-		t.Fatal("missing overlap diagnostic")
+	in.Operations[0].ID = "arbitrary/destructive-operation"
+	d := decide(t, full, in, true)
+	if !reflect.DeepEqual(d.MatchedRules, []string{"full-access"}) {
+		t.Fatalf("missing authored rule explanation: %+v", d)
 	}
-	for _, ruleKind := range []string{"deny-resource", "deny-value", "deny-missing-sibling", "mandatory"} {
-		t.Run(ruleKind, func(t *testing.T) {
-			c := policy.Config{Grants: []policy.Grant{full()}}
-			in := request()
-			in.Operations[0].Resources = []policy.Resource{{Type: "repository", ID: "blocked"}, {Type: "repository", ID: "allowed"}}
-			in.HTTP.Query = map[string][]string{"repo": {"allowed", "blocked"}}
-			switch ruleKind {
-			case "deny-resource":
-				c.Denies = []policy.Rule{{ID: "blocked", Constraints: policy.Constraints{Repositories: []string{"blocked"}}}}
-			case "deny-value":
-				c.Denies = []policy.Rule{{ID: "blocked", Constraints: policy.Constraints{Values: []policy.ValueConstraint{{Source: "query", Path: []string{"repo"}, Values: []any{"blocked"}}}}}}
-			case "deny-missing-sibling":
-				in.HTTP.Body = map[string]any{"items": []any{map[string]any{"repo": "blocked"}, map[string]any{}}}
-				c.Denies = []policy.Rule{{ID: "blocked", Constraints: policy.Constraints{Values: []policy.ValueConstraint{{Source: "body", Path: []string{"items", "*", "repo"}, Values: []any{"blocked"}}}}}}
-			case "mandatory":
-				c.Mandatory = []policy.Rule{{ID: "allowed-only", Constraints: policy.Constraints{Repositories: []string{"allowed"}}}}
-			}
-			d := decide(t, engine(t, c), in, false)
-			if len(d.DeniedBy) == 0 || len(d.MatchedGrants) == 0 {
-				t.Fatalf("missing override explanation: %+v", d)
-			}
-		})
-	}
-}
+	in.Identity.ID = "other"
+	decide(t, full, in, false)
+	decide(t, engine(t, "default allow := false", nil), request(), false)
 
-func TestJSONNumericValueSemantics(t *testing.T) {
-	denied := []any{json.Number("1"), json.Number("0"), json.Number("9007199254740992"), json.Number("1e10000")}
-	constraint := policy.ValueConstraint{Source: "body", Path: []string{"value"}, Values: denied}
-	e := engine(t, policy.Config{Grants: []policy.Grant{full()}, Denies: []policy.Rule{{ID: "number-deny", Constraints: policy.Constraints{Values: []policy.ValueConstraint{constraint}}}}})
-	for _, text := range []string{"1", "1.0", "1e0", "10e-1", "0", "-0.0e1000", "9007199254740992.0", "10e9999"} {
-		in := request()
-		in.HTTP.Body = map[string]any{"value": json.Number(text)}
-		decide(t, e, in, false)
-	}
-	for _, text := range []string{"2", "9007199254740993", "1e9999"} {
-		in := request()
-		in.HTTP.Body = map[string]any{"value": json.Number(text)}
-		decide(t, e, in, true)
-	}
-	g := full()
-	g.Constraints.Values = []policy.ValueConstraint{{Source: "body", Path: []string{"value"}, Values: []any{map[string]any{"id": json.Number("1")}}}}
-	in := request()
-	in.HTTP.Body = map[string]any{"value": map[string]any{"id": json.Number("1e0")}}
-	decide(t, engine(t, policy.Config{Grants: []policy.Grant{g}}), in, true)
-}
-
-func TestTypedQueryConstraintsNeverFallBackToRawSchemaValues(t *testing.T) {
-	g := full()
-	g.Constraints.Values = []policy.ValueConstraint{
-		{Source: "query", Path: []string{"count"}, Values: []any{1}},
-		{Source: "query", Path: []string{"enabled"}, Values: []any{true}},
-	}
-	e := engine(t, policy.Config{Grants: []policy.Grant{g}})
-	for _, test := range []struct {
-		name  string
-		query map[string]any
-		want  bool
-	}{
-		{"typed", map[string]any{"count": int64(1), "enabled": true}, true},
-		{"wrong-integer", map[string]any{"count": 2, "enabled": true}, false},
-		{"wrong-boolean", map[string]any{"count": 1, "enabled": false}, false},
-		{"untyped-integer", map[string]any{"count": "1", "enabled": true}, false},
-		{"missing-integer", map[string]any{"enabled": true}, false},
-		{"missing-normalized-query", nil, false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			in := request()
-			in.SchemaDigest = "sha256:typed"
-			in.HTTP.Query = map[string][]string{"count": {"1"}, "enabled": {"true"}}
-			in.HTTP.NormalizedQuery = test.query
-			decide(t, e, in, test.want)
-		})
-	}
-	// Raw URL spelling cannot change the authoritative normalized value.
-	in := request()
-	in.SchemaDigest = "sha256:typed"
-	in.HTTP.Query = map[string][]string{"count": {"999"}, "enabled": {"false"}}
-	in.HTTP.NormalizedQuery = map[string]any{"count": 1, "enabled": true}
-	decide(t, e, in, true)
-	g.Constraints.Values = []policy.ValueConstraint{{Source: "query", Path: []string{"count"}, Values: []any{"1"}}}
-	e = engine(t, policy.Config{Grants: []policy.Grant{g}})
+	restricted := engine(t, `
+		default allow := false
+		allow if {
+			input.identity.id == "worker"
+			input.provider == "github"
+			input.binding == "installation"
+			input.schema_digest == "sha256:reviewed"
+			every operation in input.operations {
+				operation.id in {"issues/get", "issues/create-comment"}
+			}
+			input.http.path_params.owner == "team"
+			input.http.path_params.repo == "project"
+			not blocked
+		}
+		blocked if input.http.body.locked == true
+		reasons contains "locked issue" if blocked
+		matched_rules contains "repository-access" if allow
+	`, nil)
 	in = request()
-	in.HTTP.Query = map[string][]string{"count": {"1"}}
-	decide(t, e, in, true)
-	in.SchemaDigest = "sha256:typed"
-	decide(t, e, in, false)
-	// A missing normalized map cannot neutralize a query deny beneath full.
-	e = engine(t, policy.Config{Grants: []policy.Grant{full()}, Denies: []policy.Rule{{ID: "blocked-query", Constraints: policy.Constraints{Values: []policy.ValueConstraint{{Source: "query", Path: []string{"count"}, Values: []any{1}}}}}}})
-	decide(t, e, in, false)
-}
-
-func TestRegoSeesVerifiedIdentityProofMetadata(t *testing.T) {
-	unixSource := `package pdp.custom
-import rego.v1
-deny contains "unix authentication required" if { object.get(input.identity, "auth_method", "") != "unix" }
-deny contains "root UID required" if { object.get(input.identity, "uid", -1) != 0 }
-`
-	e := engine(t, policy.Config{Grants: []policy.Grant{full()}, CustomModules: map[string]string{"identity.rego": unixSource}})
-	uid := uint32(0)
-	in := request()
-	in.Identity.AuthMethod = "unix"
-	in.Identity.UID = &uid
-	d := decide(t, e, in, true)
-	if d.Identity.UID == nil || *d.Identity.UID != 0 || d.Identity.AuthMethod != "unix" {
-		t.Fatalf("lost verified identity proof metadata: %+v", d.Identity)
+	in.HTTP.PathParams = map[string]string{"owner": "team", "repo": "project"}
+	decide(t, restricted, in, true)
+	in.Operations = append(in.Operations, policy.OperationInput{ID: "issues/delete"})
+	decide(t, restricted, in, false)
+	in.Operations = in.Operations[:1]
+	in.HTTP.PathParams["repo"] = "other"
+	decide(t, restricted, in, false)
+	in.HTTP.PathParams["repo"] = "project"
+	in.HTTP.Body = map[string]any{"locked": true}
+	d = decide(t, restricted, in, false)
+	if !reflect.DeepEqual(d.Reasons, []string{"locked issue"}) {
+		t.Fatalf("missing authored denial explanation: %+v", d)
 	}
-	*d.Identity.UID = 42
-	decide(t, e, in, true)
-	in.Identity.UID = nil
-	decide(t, e, in, false)
-	in.Identity.UID = &uid
-	in.Identity.AuthMethod = "spiffe"
-	decide(t, e, in, false)
-	spiffeSource := `package pdp.custom
-import rego.v1
-deny contains "SPIFFE authentication required" if { object.get(input.identity, "auth_method", "") != "spiffe" }
-deny contains "wrong verified SVID" if { object.get(input.identity, "spiffe_id", "") != "spiffe://example.org/workload" }
-`
-	e = engine(t, policy.Config{Grants: []policy.Grant{full()}, CustomModules: map[string]string{"identity.rego": spiffeSource}})
-	in.Identity.UID = nil
-	in.Identity.SPIFFEID = "spiffe://example.org/workload"
-	decide(t, e, in, true)
-	in.Identity.SPIFFEID = "spiffe://other.org/workload"
-	decide(t, e, in, false)
 }
 
-func TestGraphQLResourceInheritanceIsOccurrenceScoped(t *testing.T) {
-	g := full()
-	g.Constraints.Issues = []string{"allowed"}
-	root := policy.Operation{ID: "Query.issue", Provider: "github", Classification: policy.ReadOperation, Reviewed: true, Resources: []policy.ResourceSelector{{Type: "issue", Source: "graphql", Path: []string{"id"}}}}
-	child := policy.Operation{ID: "Issue.related", Provider: "github", Classification: policy.ReadOperation, Reviewed: true, Resources: []policy.ResourceSelector{{Type: "issue", Source: "graphql", Path: []string{"id"}}}}
-	e := engine(t, policy.Config{Operations: []policy.Operation{root, child}, Grants: []policy.Grant{g}})
+// Exact verified proof metadata reaches source, including a present Unix UID 0.
+func TestVerifiedIdentityProofs(t *testing.T) {
+	e := engine(t, `
+		default allow := false
+		allow if {
+			input.identity.auth_method == "unix-peer"
+			input.identity.uid == 0
+		}
+		allow if {
+			input.identity.auth_method == "spiffe-mtls"
+			input.identity.spiffe_id == "spiffe://example.test/worker"
+		}
+	`, nil)
+	zero, other := uint32(0), uint32(1000)
+	for _, tc := range []struct {
+		name     string
+		identity policy.Identity
+		allow    bool
+	}{
+		{"uid-zero", policy.Identity{ID: "local-root", AuthMethod: "unix-peer", UID: &zero}, true},
+		{"uid-other", policy.Identity{ID: "local-root", AuthMethod: "unix-peer", UID: &other}, false},
+		{"uid-absent", policy.Identity{ID: "local-root", AuthMethod: "unix-peer"}, false},
+		{"spiffe", policy.Identity{ID: "workload", AuthMethod: "spiffe-mtls", SPIFFEID: "spiffe://example.test/worker"}, true},
+		{"spiffe-other", policy.Identity{ID: "workload", AuthMethod: "spiffe-mtls", SPIFFEID: "spiffe://example.test/other"}, false},
+		{"proof-method", policy.Identity{ID: "workload", AuthMethod: "unix-peer", SPIFFEID: "spiffe://example.test/worker"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := request()
+			in.Identity = tc.identity
+			d := decide(t, e, in, tc.allow)
+			if !reflect.DeepEqual(d.Identity, tc.identity) {
+				t.Fatalf("identity was rewritten: got %+v want %+v", d.Identity, tc.identity)
+			}
+		})
+	}
+}
+
+func TestGraphQLRepeatedOccurrences(t *testing.T) {
+	e := engine(t, `
+		default allow := false
+		allow if {
+			count(input.graphql) == 2
+			every field in input.graphql {
+				field.coordinate == "Query.issue"
+				field.arguments.id == "APP-1"
+			}
+			input.graphql[0].response_path == ["first"]
+			input.graphql[1].response_path == ["second"]
+		}
+	`, nil)
 	in := request()
-	in.Operations = nil
+	in.Provider = "linear"
+	in.Operations = []policy.OperationInput{{ID: "Query.issue", Resources: []policy.Resource{{Type: "issue", ID: "APP-1"}}}}
 	in.GraphQL = []policy.FieldOccurrence{
-		{Coordinate: "Query.issue", Path: []string{"a"}, Arguments: map[string]any{"id": "allowed"}},
-		{Coordinate: "Issue.title", Path: []string{"a", "title"}, Arguments: map[string]any{}},
+		{Coordinate: "Query.issue", Path: []string{"first"}, ResponsePath: []string{"first"}, Alias: "first", Arguments: map[string]any{"id": "APP-1"}},
+		{Coordinate: "Query.issue", Path: []string{"second"}, ResponsePath: []string{"second"}, Alias: "second", Arguments: map[string]any{"id": "APP-1"}},
 	}
-	decide(t, e, in, true)
-	// A root occurrence cannot lend its authorized issue to an unrelated alias.
-	in.GraphQL = append(in.GraphQL, policy.FieldOccurrence{Coordinate: "Issue.title", Path: []string{"b", "title"}, Arguments: map[string]any{}})
-	decide(t, e, in, false)
-	in.GraphQL = append(in.GraphQL[:2], policy.FieldOccurrence{Coordinate: "Query.issue", Path: []string{"b"}, Arguments: map[string]any{"id": "blocked"}}, policy.FieldOccurrence{Coordinate: "Issue.title", Path: []string{"b", "title"}, Arguments: map[string]any{}})
-	decide(t, e, in, false)
-	// A child introducing another resource cannot erase its inherited context.
-	in.GraphQL = append(in.GraphQL[:2], policy.FieldOccurrence{Coordinate: "Issue.related", Path: []string{"a", "related"}, Arguments: map[string]any{"id": "blocked"}})
-	decide(t, e, in, false)
-}
-
-func TestReviewedMutationObjectTargetRestrictions(t *testing.T) {
-	shape := policy.ObjectConstraint{Source: "graphql", Field: "Mutation.commentCreate", Path: []string{"input"}, AllowedKeys: []string{"issueId", "body"}, RequiredStringKeys: []string{"issueId", "body"}}
-	op := policy.Operation{ID: "Mutation.commentCreate", Provider: "github", Reviewed: true, Classification: policy.WriteOperation, Resources: []policy.ResourceSelector{{Type: "issue", Source: "graphql", Path: []string{"input", "issueId"}}}, Constraints: policy.Constraints{Objects: []policy.ObjectConstraint{shape}}}
-	input := func(value any) policy.Input {
-		in := request()
-		in.Operations = nil
-		in.GraphQL = []policy.FieldOccurrence{{Coordinate: op.ID, Path: []string{"add"}, Arguments: map[string]any{"input": value}}}
-		return in
-	}
-	valid := map[string]any{"issueId": "approved", "body": "comment"}
-	for _, mode := range []policy.Mode{policy.ReadWrite, ""} {
-		t.Run(string(mode)+"restricted", func(t *testing.T) {
-			g := full()
-			g.Mode = mode
-			g.Constraints.Issues = []string{"approved"}
-			if mode == "" {
-				g.Scope.Operations = []string{op.ID}
-			}
-			e := engine(t, policy.Config{Operations: []policy.Operation{op}, Grants: []policy.Grant{g}})
-			decide(t, e, input(valid), true)
-			for _, key := range []string{"projectId", "parentId", "documentContentId", "postId", "createAsUser", "slackChannelId", "slackNotificationOptOut"} {
-				decide(t, e, input(map[string]any{"issueId": "approved", "body": "comment", key: "foreign"}), false)
-			}
-			for _, value := range []any{map[string]any{"issueId": "approved"}, map[string]any{"issueId": "approved", "body": " "}, map[string]any{"body": "comment", "projectId": "foreign"}, map[string]any{"issueId": "approved", "body": true}, []any{valid}, nil} {
-				decide(t, e, input(value), false)
-			}
-			in := input(valid)
-			in.GraphQL = append(in.GraphQL, policy.FieldOccurrence{Coordinate: op.ID, Path: []string{"other"}, Arguments: map[string]any{"input": map[string]any{"issueId": "approved", "body": "comment", "parentId": "foreign"}}})
-			decide(t, e, in, false)
-		})
-	}
-	// Full deliberately bypasses reviewed profile safety, not mandatory rules.
-	c := policy.Config{Operations: []policy.Operation{op}, Grants: []policy.Grant{full()}}
-	in := input(map[string]any{"body": "comment", "projectId": "foreign"})
-	decide(t, engine(t, c), in, true)
-	c.Mandatory = []policy.Rule{{ID: "only-issue-comments", Scope: policy.Scope{Operations: []string{op.ID}}, Constraints: policy.Constraints{Objects: []policy.ObjectConstraint{shape}}}}
-	decide(t, engine(t, c), in, false)
-	decide(t, engine(t, c), input(valid), true)
-	c.Operations[0].Constraints.Objects[0].RequiredStringKeys = []string{"not-allowed"}
-	c.Revision = "invalid-shape"
-	if _, err := policy.New(context.Background(), c); err == nil {
-		t.Fatal("accepted required object key outside allowed keys")
-	}
-}
-
-// Distinct occurrences must not merge arguments or inherit one matching alias.
-func TestGraphQLRepeatedOccurrencesAndCollectionConstraints(t *testing.T) {
-	g := full()
-	g.Constraints.Values = []policy.ValueConstraint{{Source: "graphql", Field: "Query.issue", Path: []string{"id"}, Values: []any{"allowed"}}}
-	e := engine(t, policy.Config{Grants: []policy.Grant{g}})
-	in := request()
-	in.Operations = nil
-	in.GraphQL = []policy.FieldOccurrence{{Coordinate: "Query.issue", Path: []string{"a"}, Arguments: map[string]any{"id": "allowed"}}, {Coordinate: "Query.issue", Path: []string{"b"}, Arguments: map[string]any{"id": "blocked"}}}
-	decide(t, e, in, false)
-	in.GraphQL[1].Arguments["id"] = "allowed"
 	d := decide(t, e, in, true)
-	if len(d.Operations) != 2 {
-		t.Fatal("field occurrences were collapsed")
+	if len(d.Operations) != 2 || d.Operations[0].Path[0] != "first" || d.Operations[1].Path[0] != "second" || !reflect.DeepEqual(d.Operations[1].Resources, in.Operations[0].Resources) {
+		t.Fatalf("occurrences collapsed or changed: %+v", d.Operations)
 	}
-	g.Constraints.Values = []policy.ValueConstraint{{Source: "body", Path: []string{"items", "*", "repo"}, Values: []any{"allowed"}}}
-	e = engine(t, policy.Config{Grants: []policy.Grant{g}})
-	in = request()
-	in.HTTP.Body = map[string]any{"items": []any{map[string]any{"repo": "allowed"}, map[string]any{}}}
+	in.GraphQL[1].Arguments["id"] = "APP-2"
 	decide(t, e, in, false)
-	in.HTTP.Body = map[string]any{"items": []any{map[string]any{"repo": "allowed"}, map[string]any{"repo": "allowed"}}}
+	in.GraphQL[1].Arguments = map[string]any{}
+	decide(t, e, in, false)
+	in.GraphQL[1].Arguments["id"] = "APP-1"
 	decide(t, e, in, true)
 }
 
-func TestRelationshipScopeExpiryAndTaskSelection(t *testing.T) {
-	now := time.Now().UTC()
-	g := full()
-	g.Constraints.Relationship = &policy.RelationshipRequirement{Permission: "edit", ResourceTypes: []string{"issue"}}
-	s := &policy.RelationshipSnapshot{Revision: "graph-1", IssuedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour), MaxAge: 2 * time.Minute, IdentityTasks: []policy.IdentityTask{{Identity: "uid:1000", Task: "task-a", ExpiresAt: now.Add(time.Hour)}}, TaskResources: []policy.TaskResource{{Task: "task-a", Resource: policy.Resource{Type: "issue", ID: "issue-a"}, Permission: "edit", ExpiresAt: now.Add(time.Hour)}}}
+// Arbitrary administrator data is standard OPA data, with no Go permission DSL.
+func TestArbitrarySourceAndExactJSONNumbers(t *testing.T) {
+	e := engine(t, `
+		default allow := false
+		allow if {
+			input.http.body.counter == data.business.counter
+			input.http.normalized_query.limit == 1
+			input.variables.options == data.business.options
+			startswith(input.http.path, "/api")
+			not input._pdp
+		}
+	`, map[string]any{"business": map[string]any{
+		"counter": json.Number("9007199254740993"),
+		"options": map[string]any{"threshold": json.Number("1.25"), "enabled": true},
+	}})
 	in := request()
-	in.Identity.TaskID = "task-a"
-	in.Operations[0].Resources = []policy.Resource{{Type: "issue", ID: "issue-a"}}
-	decide(t, engine(t, policy.Config{Grants: []policy.Grant{g}}), in, false)
-	for _, test := range []struct {
-		name   string
-		mutate func(*policy.RelationshipSnapshot, *policy.Input)
-		want   bool
+	in.HTTP.Query = map[string][]string{"limit": {"1"}}
+	in.HTTP.NormalizedQuery = map[string]any{"limit": json.Number("1e0")}
+	in.Variables = map[string]any{"options": map[string]any{"threshold": json.Number("1.250"), "enabled": true}}
+	for _, tc := range []struct {
+		number string
+		allow  bool
 	}{
-		{"valid", func(*policy.RelationshipSnapshot, *policy.Input) {}, true},
-		{"wrong-task", func(_ *policy.RelationshipSnapshot, i *policy.Input) { i.Identity.TaskID = "task-b" }, false},
-		{"missing-task", func(_ *policy.RelationshipSnapshot, i *policy.Input) { i.Identity.TaskID = "" }, false},
-		{"stale", func(s *policy.RelationshipSnapshot, _ *policy.Input) { s.MaxAge = time.Second }, false},
-		{"expired-snapshot", func(s *policy.RelationshipSnapshot, _ *policy.Input) { s.ExpiresAt = now.Add(-time.Second) }, false},
-		{"expired-membership", func(s *policy.RelationshipSnapshot, _ *policy.Input) {
-			s.IdentityTasks[0].ExpiresAt = now.Add(-time.Second)
-		}, false},
-		{"expired-resource", func(s *policy.RelationshipSnapshot, _ *policy.Input) {
-			s.TaskResources[0].ExpiresAt = now.Add(-time.Second)
-		}, false},
-		{"wrong-permission", func(s *policy.RelationshipSnapshot, _ *policy.Input) { s.TaskResources[0].Permission = "read" }, false},
+		{"9007199254740993", true}, {"9007199254740993.0", true}, {"9007199254740992", false}, {"9007199254740994", false},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			b, _ := json.Marshal(s)
-			var copy policy.RelationshipSnapshot
-			_ = json.Unmarshal(b, &copy)
-			input := in
-			test.mutate(&copy, &input)
-			decide(t, engine(t, policy.Config{Grants: []policy.Grant{g}, Relationships: &copy}), input, test.want)
+		in.HTTP.Body = map[string]any{"counter": json.Number(tc.number)}
+		decide(t, e, in, tc.allow)
+	}
+}
+
+func TestInvalidResultsAndEvaluationErrorsFailClosed(t *testing.T) {
+	for _, tc := range []struct{ name, source, errorText string }{
+		{"missing-allow", `reasons contains "no decision"`, "policy allow"},
+		{"undefined-allow", `allow if input.identity.id == "nobody"`, "policy allow"},
+		{"nonboolean-allow", `allow := "true"`, "policy allow"},
+		{"null-allow", `allow := null`, "policy allow"},
+		{"invalid-reasons", "allow := true\nreasons := \"trusted\"", "policy reasons"},
+		{"nonstring-reasons", "allow := true\nreasons contains 42", "policy reasons"},
+		{"invalid-matched-rules", "allow := true\nmatched_rules contains {\"id\": \"rule\"}", "policy matched_rules"},
+		{"builtin-error", "default allow := false\nallow if { to_number(input.http.path) > 0 }", "eval_builtin_error"},
+		{"evaluation-conflict", "allow := true\nallow := false if input.identity.id == \"worker\"", "eval_conflict_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := engine(t, tc.source, nil).Evaluate(context.Background(), request())
+			if d.Allow || err == nil || !strings.Contains(err.Error(), tc.errorText) {
+				t.Fatalf("malformed result must deny: decision=%+v error=%v", d, err)
+			}
 		})
 	}
-	// Even an expired graph must not impose a relationship on an unrelated grant.
-	s.ExpiresAt = now.Add(-time.Second)
-	direct := full()
-	direct.ID = "unrelated-direct"
-	decide(t, engine(t, policy.Config{Grants: []policy.Grant{g, direct}, Relationships: s}), in, true)
 }
 
-func TestNoPositiveDecisionCacheAndFrozenRevision(t *testing.T) {
-	expires := time.Now().Add(time.Second)
-	g := full()
-	g.Constraints.Relationship = &policy.RelationshipRequirement{Permission: "read"}
-	c := policy.Config{Revision: "revision-a", Grants: []policy.Grant{g}, Relationships: &policy.RelationshipSnapshot{Revision: "graph-a", IssuedAt: time.Now().Add(-time.Second), ExpiresAt: time.Now().Add(time.Hour), MaxAge: time.Hour, IdentityTasks: []policy.IdentityTask{{Identity: "uid:1000", Task: "task-a", ExpiresAt: expires}}, TaskResources: []policy.TaskResource{{Task: "task-a", Resource: policy.Resource{Type: "issue", ID: "1"}, Permission: "read", ExpiresAt: time.Now().Add(time.Hour)}}}}
-	e := engine(t, c)
-	in := request()
-	in.Identity.TaskID = "task-a"
-	in.Operations[0].Resources = []policy.Resource{{Type: "issue", ID: "1"}}
-	explanation := decide(t, e, in, true)
-	if explanation.Identity.ID != in.Identity.ID || explanation.Binding != in.Binding || len(explanation.MatchedGrantDetails) != 1 {
-		t.Fatalf("incomplete explanation: %+v", explanation)
+func TestConfigValidationAndRestrictedCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config policy.Config
+	}{
+		{"revision", policy.Config{Modules: map[string]string{"authz.rego": "package pdp.authz\nallow := true"}}},
+		{"no-module", policy.Config{Revision: "r1"}},
+		{"empty-source", policy.Config{Revision: "r1", Modules: map[string]string{"authz.rego": " "}}},
+		{"empty-name", policy.Config{Revision: "r1", Modules: map[string]string{"": "package pdp.authz\nallow := true"}}},
+		{"namespace", policy.Config{Revision: "r1", Modules: map[string]string{"other.rego": "package other\nallow := true"}}},
+		{"syntax", policy.Config{Revision: "r1", Modules: map[string]string{"authz.rego": "package pdp.authz\nallow if {"}}},
+		{"shadow-contract", policy.Config{Revision: "r1", Modules: map[string]string{"authz.rego": "package pdp.authz\ndefault allow := false"}, Data: map[string]any{"pdp": map[string]any{"authz": map[string]any{"allow": true}}}}},
+		{"shadow-parent", policy.Config{Revision: "r1", Modules: map[string]string{"authz.rego": "package pdp.authz\nallow := true"}, Data: map[string]any{"pdp": true}}},
+		{"non-json-data", policy.Config{Revision: "r1", Modules: map[string]string{"authz.rego": "package pdp.authz\nallow := true"}, Data: map[string]any{"invalid": make(chan int)}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := policy.New(context.Background(), tc.config); err == nil {
+				t.Fatal("invalid configuration accepted")
+			}
+		})
 	}
-	explanation.MatchedGrantDetails[0].Constraints.Relationship.Permission = "admin"
-	explanation.Operations[0].Resources[0].ID = "different"
-	c.Grants[0].Scope.Identities[0] = "uid:attacker"
-	c.Revision = "changed"
-	c.Relationships.IdentityTasks[0].ExpiresAt = time.Now().Add(time.Hour)
-	decide(t, e, in, true)
-	<-time.After(time.Until(expires) + 10*time.Millisecond)
-	decide(t, e, in, false)
+	for name, body := range map[string]string{
+		"http":    `http.send({"method": "GET", "url": "http://127.0.0.1"})`,
+		"dns":     `net.lookup_ip_addr("localhost")`,
+		"runtime": `opa.runtime()`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := policy.New(context.Background(), policy.Config{Revision: "r1", Modules: map[string]string{
+				"authz.rego": "package pdp.authz\nallow if { " + body + " }",
+			}})
+			if err == nil || !strings.Contains(err.Error(), "undefined function") {
+				t.Fatalf("restricted builtin accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestFrozenSnapshotConcurrentEvaluationAndCancellation(t *testing.T) {
+	data := map[string]any{"approved": []any{"worker"}}
+	modules := map[string]string{
+		"authz.rego":   "package pdp.authz\ndefault allow := false\nallow if approved(input.identity.id)\nmatched_rules contains \"approved\" if allow",
+		"helpers.rego": "package pdp.authz\napproved(identity) if identity in data.approved",
+	}
+	config := policy.Config{Revision: "before", Modules: modules, Data: data}
+	e, err := policy.New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Revision = "after"
+	modules["authz.rego"] = "package pdp.authz\nallow := false"
+	data["approved"].([]any)[0] = "other"
+	const count = 24
 	var wg sync.WaitGroup
-	for range 8 {
+	for i := range count {
 		wg.Go(func() {
-			for range 10 {
-				d, err := e.Evaluate(context.Background(), in)
-				if err != nil || d.Allow || d.Revision != "revision-a" {
-					t.Errorf("concurrent decision: %+v, %v", d, err)
-				}
+			in := request()
+			want := i%2 == 0
+			if !want {
+				in.Identity.ID = "other"
+			}
+			d, err := e.Evaluate(context.Background(), in)
+			if err != nil || d.Allow != want || d.Revision != "before" {
+				t.Errorf("snapshot evaluation: allow=%v want=%v revision=%q err=%v", d.Allow, want, d.Revision, err)
 			}
 		})
 	}
 	wg.Wait()
+	in := request()
+	uid := uint32(1000)
+	in.Identity.UID = &uid
+	in.Operations[0].Resources = []policy.Resource{{Type: "issue", ID: "APP-1"}}
+	d := decide(t, e, in, true)
+	*d.Identity.UID = 7
+	d.Operations[0].Resources[0].ID = "changed"
+	d.MatchedRules[0] = "changed"
+	if uid != 1000 || in.Operations[0].Resources[0].ID != "APP-1" {
+		t.Fatal("decision aliases input")
+	}
+	d = decide(t, e, in, true)
+	if !reflect.DeepEqual(d.MatchedRules, []string{"approved"}) {
+		t.Fatal("decision mutation changed snapshot")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d, err = e.Evaluate(ctx, in)
+	if d.Allow || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled evaluation: %+v, %v", d, err)
+	}
+	if _, err := policy.New(ctx, policy.Config{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled construction: %v", err)
+	}
 }
 
-func TestCustomRegoCannotGrantOrBypassRestrictions(t *testing.T) {
-	for _, test := range []struct {
-		name, source string
-		grants       []policy.Grant
-		mandatory    []policy.Rule
-		want         bool
-	}{
-		{"cannot-grant", "package pdp.custom\nimport rego.v1\nallow := true", nil, nil, false},
-		{"can-constrain", "package pdp.custom\nimport rego.v1\ndeny contains \"blocked\" if { input.identity.id == \"uid:1000\" }", []policy.Grant{full()}, nil, false},
-		{"cannot-bypass", "package pdp.custom\nimport rego.v1\nallow := true", []policy.Grant{full()}, []policy.Rule{{ID: "digest", Constraints: policy.Constraints{SchemaDigests: []string{"required"}}}}, false},
-		{"empty-deny", "package pdp.custom\nimport rego.v1\ndeny contains \"other\" if { input.identity.id == \"someone-else\" }", []policy.Grant{full()}, nil, true},
+func TestTrustedEnvelopeFailsClosed(t *testing.T) {
+	e := engine(t, "allow := true", nil)
+	for name, mutate := range map[string]func(*policy.Input){
+		"version":             func(in *policy.Input) { in.Version = "v2" },
+		"identity":            func(in *policy.Input) { in.Identity.ID = "" },
+		"provider":            func(in *policy.Input) { in.Provider = "" },
+		"binding":             func(in *policy.Input) { in.Binding = "" },
+		"no-operations":       func(in *policy.Input) { in.Operations = nil },
+		"operation-id":        func(in *policy.Input) { in.Operations[0].ID = "" },
+		"graphql-coordinate":  func(in *policy.Input) { in.GraphQL = []policy.FieldOccurrence{{}} },
+		"resource-id":         func(in *policy.Input) { in.Operations[0].Resources = []policy.Resource{{Type: "issue"}} },
+		"query-normalization": func(in *policy.Input) { in.HTTP.Query = map[string][]string{"limit": {"1"}} },
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			e := engine(t, policy.Config{Grants: test.grants, Mandatory: test.mandatory, CustomModules: map[string]string{"custom.rego": test.source}})
-			decide(t, e, request(), test.want)
+		t.Run(name, func(t *testing.T) {
+			in := request()
+			mutate(&in)
+			decide(t, e, in, false)
 		})
 	}
-	for _, source := range []string{"package pdp.base\nallow := true", "package pdp.custom\ndeny := false", "package pdp.custom\nimport rego.v1\ndeny contains \"network\" if { http.send({\"method\":\"GET\",\"url\":\"http://127.0.0.1\"}) }"} {
-		if _, err := policy.New(context.Background(), policy.Config{Revision: "r", CustomModules: map[string]string{"bad.rego": source}}); err == nil {
-			t.Fatalf("accepted unsafe custom module %q", source)
-		}
-	}
-	e := engine(t, policy.Config{Grants: []policy.Grant{full()}, CustomModules: map[string]string{"runtime.rego": "package pdp.custom\nimport rego.v1\ndeny contains \"bad number\" if { to_number(input.http.method) > 0 }"}})
-	d, err := e.Evaluate(context.Background(), request())
-	if err == nil || d.Allow || d.Revision != e.Revision() {
-		t.Fatalf("custom runtime failure did not fail closed: %+v, %v", d, err)
+	in := request()
+	in.HTTP.Body = make(chan int)
+	if d, err := e.Evaluate(context.Background(), in); err == nil || d.Allow {
+		t.Fatalf("non-JSON input accepted: %+v, %v", d, err)
 	}
 }
 
-func TestResourceExtractionAndUnknownOperationDiagnostics(t *testing.T) {
-	g := full()
-	g.Mode = policy.Read
-	g.Constraints.Issues = []string{"9007199254740993"}
-	c := policy.Config{Operations: []policy.Operation{{ID: "getIssue", Provider: "github", Reviewed: true, Classification: policy.ReadOperation, Resources: []policy.ResourceSelector{{Type: "issue", Source: "body", Path: []string{"id"}}}}}, Grants: []policy.Grant{g}}
-	e := engine(t, c)
+func TestTimeSensitivePolicyIsReevaluated(t *testing.T) {
+	e := engine(t, `
+		default allow := false
+		allow if time.now_ns() < input.http.body.expires_at_ns
+	`, nil)
 	in := request()
-	in.HTTP.Body = map[string]any{"id": json.Number("9007199254740993")}
+	expires := time.Now().Add(time.Second)
+	in.HTTP.Body = map[string]any{"expires_at_ns": expires.UnixNano()}
 	decide(t, e, in, true)
-	in.HTTP.Body = map[string]any{"id": json.Number("9007199254740992")}
-	decide(t, e, in, false)
-	in.HTTP.Body = nil
-	decide(t, e, in, false)
-	numericConfig := c
-	numericGrant := full()
-	numericConfig.Grants = []policy.Grant{numericGrant}
-	numericConfig.Denies = []policy.Rule{{ID: "one-is-blocked", Constraints: policy.Constraints{Issues: []string{"1"}}}}
-	numericEngine := engine(t, numericConfig)
-	for _, text := range []string{"1.0", "1e0", "1.5", "1e10000"} {
-		in.HTTP.Body = map[string]any{"id": json.Number(text)}
-		decide(t, numericEngine, in, false)
-	}
-	c.Grants[0].Scope.Operations = []string{"typo"}
-	e = engine(t, c)
-	found := false
-	for _, d := range e.Diagnostics() {
-		if d.Code == "unknown_operation_reference" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("missing unknown operation diagnostic")
-	}
-	c.CustomModules = map[string]string{"reference.rego": "package pdp.custom\nimport rego.v1\ndeny contains \"unknown\" if { input.graphql[_].coordinate == \"Query.typo\" }"}
-	e = engine(t, c)
-	found = false
-	for _, d := range e.Diagnostics() {
-		if d.Code == "unknown_operation_reference" && len(d.Rules) == 1 && d.Rules[0] == "reference.rego" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("missing custom policy unknown operation diagnostic")
-	}
-	c.Operations[0].ID = "untyped:http:GET"
-	c.Revision = "reserved-namespace-check"
-	if _, err := policy.New(context.Background(), c); err == nil {
-		t.Fatal("accepted reviewed operation in schema-free namespace")
-	}
-}
-
-func TestCheckedInPolicyExample(t *testing.T) {
-	b, err := os.ReadFile("../../policies/direct.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var c policy.Config
-	if err = json.Unmarshal(b, &c); err != nil {
-		t.Fatal(err)
-	}
-	e := engine(t, c)
-	in := request()
-	in.Identity.ID = "uid:1000"
-	in.Provider = "github"
-	in.Binding = "github-work"
-	in.Operations[0].ID = "unregistered"
-	decide(t, e, in, true)
-	b, err = os.ReadFile("../../policies/restrict.rego")
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.CustomModules = map[string]string{"restrict.rego": string(b)}
-	e = engine(t, c)
-	in.HTTP.Query = map[string][]string{"dangerous": {"true"}}
-	decide(t, e, in, false)
-	in.SchemaDigest = "sha256:typed"
-	in.HTTP.Query["dangerous"] = []string{"1"}
-	in.HTTP.NormalizedQuery = map[string]any{"dangerous": true}
-	decide(t, e, in, false)
-	in.HTTP.NormalizedQuery["dangerous"] = false
-	decide(t, e, in, true)
-	b, err = os.ReadFile("../../policies/restricted.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var restricted policy.Config
-	if err = json.Unmarshal(b, &restricted); err != nil {
-		t.Fatal(err)
-	}
-	e = engine(t, restricted)
-	in = request()
-	in.Binding = "github-work"
-	in.SchemaDigest = "sha256:replace-with-reviewed-schema-digest"
-	in.HTTP.PathParams = map[string]string{"owner": "gfx-labs", "repo": "pdp", "issue_number": "1"}
-	decide(t, e, in, true)
-	in.HTTP.PathParams["owner"] = "another-owner"
-	decide(t, e, in, false)
-	in.HTTP.PathParams["owner"] = "gfx-labs"
-	in.HTTP.PathParams["issue_number"] = "2"
+	time.Sleep(time.Until(expires) + time.Millisecond)
 	decide(t, e, in, false)
 }
