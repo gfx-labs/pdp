@@ -1,6 +1,6 @@
 # github-read
 
-Read one GitHub repository, its issues and issue comments, for named Unix UIDs. Uses a static token.
+Read one GitHub repository, its issues and issue comments, for named Unix UIDs. Uses a static token. `pdp.json` attaches the `github-repo` binding and the `github` REST schema to `api.github.com`, so every request is validated against `github-rest.json` and reaches the policy as reviewed operations.
 
 ## Edit
 
@@ -27,11 +27,11 @@ bin/pdp serve --config /etc/pdp/pdp.json
 PDP_SOCKET=/run/pdp/pdp.sock
 PDP_REPOSITORY=APPROVED_OWNER/APPROVED_REPOSITORY
 bin/pdp request --socket "$PDP_SOCKET" \
-  --path "/upstreams/github/repos/$PDP_REPOSITORY"
+  --url "https://api.github.com/repos/$PDP_REPOSITORY"
 bin/pdp request --socket "$PDP_SOCKET" \
-  --path "/upstreams/github/repos/$PDP_REPOSITORY/issues/123"
+  --url "https://api.github.com/repos/$PDP_REPOSITORY/issues/123"
 bin/pdp request --socket "$PDP_SOCKET" \
-  --path "/upstreams/github/repos/$PDP_REPOSITORY/issues/123/comments?per_page=10"
+  --url "https://api.github.com/repos/$PDP_REPOSITORY/issues/123/comments?per_page=10"
 ```
 
 | Request | Result |
@@ -39,7 +39,8 @@ bin/pdp request --socket "$PDP_SOCKET" \
 | Repository, issue or comment list in an allowed repository | Allowed |
 | Same repository name under another owner | 403 |
 | `POST .../issues/123/comments` with `requests/create-comment.json` | 403 |
-| An operation not in `github-rest.json` | Rejected before the policy runs |
+| An operation not in `github-rest.json` | 400, rejected before the policy runs |
 | Caller UID not in `allowed_uids` | 403 |
+| Any host other than `api.github.com` | 403 |
 
 Denied requests do not read the token or reach GitHub.

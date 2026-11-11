@@ -1,6 +1,6 @@
 # linear-read
 
-Read named Linear issues, for named Unix UIDs. Uses Linear client credentials with the app actor and the `read` scope.
+Read named Linear issues, for named Unix UIDs. Uses Linear client credentials with the app actor and the `read` scope. `pdp.json` attaches the `linear-app` binding and the `linear` GraphQL schema to `api.linear.app`. Only `POST /graphql` is accepted there.
 
 ## Edit
 
@@ -19,7 +19,7 @@ bin/pdp validate --config examples/packs/linear-read/pdp.json
 ```sh
 bin/pdp serve --config /etc/pdp/pdp.json
 bin/pdp request --socket /run/pdp/pdp.sock --method POST \
-  --path /upstreams/linear/graphql \
+  --url https://api.linear.app/graphql \
   --body examples/packs/linear-read/requests/read-issue.json
 ```
 
@@ -29,7 +29,7 @@ bin/pdp request --socket /run/pdp/pdp.sock --method POST \
 | `read-mixed-scope.json`: one allowed and one other issue through aliases and a fragment | 403 for the whole request |
 | `create-comment.json` | 403 |
 | A field not listed in `issue_fields`, even one in the schema | 403 |
-| A field not in `linear.graphql`, a batch or a subscription | Rejected before the policy runs |
+| A field not in `linear.graphql`, a batch or a subscription | 400, rejected before the policy runs |
 
 The policy checks every selected field, and finds each field's parent by path. An allowed alias does not make a sibling alias allowed. A field behind `@skip` or `@include` is checked whether or not it would run.
 

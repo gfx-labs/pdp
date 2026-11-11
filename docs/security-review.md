@@ -16,6 +16,17 @@ The code has changed since. Rego written by administrators is now the only polic
 
 **The direct-Rego engine and the identity change have not had an independent review.** That covers the `pkg/policy` evaluation path, the restricted builtin set, fail-closed handling of malformed results, and the move of identity mapping from Go into Rego. The change also makes a previously `401` case a `403`. Every local UID that can open the socket, and every workload in a trusted SPIFFE domain, now reaches policy. A policy author who forgets to compare `input.identity` or `input.schema_digest` gets the policy they wrote, and nothing else catches that. The acceptance trace below describes the earlier design and must not be read as evidence for the current one. For current evidence see [acceptance.md](acceptance.md).
 
+**The forward proxy has not had an independent review either.** PDP no longer serves two fixed routes. It is a forward proxy for any HTTP destination, described in [forward-proxy.md](forward-proxy.md). The following are new and unreviewed:
+
+- Destination handling: absolute-form requests, `CONNECT`, transparent listeners that take the destination from `Host` and SNI, host normalization, the two policy evaluations before and after DNS resolution, and dialing pinned to the addresses policy saw.
+- TLS interception: leaf minting from the `interception` CA (`pkg/intercept`), per-request authentication inside an open `CONNECT`, and refusal of an inner request that names another host.
+- Opaque tunnels, WebSocket relay and streamed responses, including the streamed credential scanner (`credential.Scanner`), which matches raw bytes only and does not see JSON-escaped forms or WebSocket frames.
+- Transparent identity by source address (`pkg/auth/transparent.go`).
+- DNS steering (`pkg/steer`), which answers only configured names and forwards or refuses the rest over UDP.
+- Placeholder bindings, fixed binding `headers`, removal of caller authentication headers before injection, and token paths answered locally.
+
+Findings that concerned fixed routes change scope with this. SR-07 (response credential reflection) still holds for schema-backed upstreams, whose responses stay buffered, strict JSON and fully scanned. It does not hold in the same form for stream destinations, which forward the upstream's own headers and bodies and use the narrower streamed scan. The "Fixed destination/binding" row in the acceptance trace no longer describes the code: any destination can be requested, and only policy restricts it.
+
 ## Scope and method
 
 The reviewer read `pkg/auth`, `pkg/gateway`, `pkg/policy`, `pkg/schema`, `pkg/credential`, `pkg/config`, their CLI callers and the deployment examples while separate owners implemented them. Findings were sent to the responsible owner and coordinator. The reviewer did not change worker-owned implementation. Independent probes used Go overlays outside this repository, including an immutable pre-fix source snapshot, without reverting shared files. No review scaffolding tests are shipped. Retained security regressions belong to the implementation owners and exercise PDP's own public authorization, transport and lifecycle boundaries.

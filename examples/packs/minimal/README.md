@@ -1,6 +1,8 @@
 # minimal
 
-Full access to one GitHub credential for named Unix UIDs. No schema, so requests are not classified: the policy gates the binding, and the provider credential's own scope is the only other limit. Use a narrowly scoped token.
+Full access to one GitHub credential for named Unix UIDs. `pdp.json` attaches the `github-local` binding to `api.github.com`. No schema is pinned, so requests are not classified: the policy allows the destination and binding, and the provider credential's own scope is the only other limit. Use a narrowly scoped token.
+
+The policy allows nothing else. A request to any other host reaches the policy and is denied.
 
 ## Edit
 
@@ -22,7 +24,7 @@ The explanation allows UID 1000 with `matched_rules` `github-full`.
 ```sh
 bin/pdp serve --config /etc/pdp/pdp.json
 bin/pdp request --socket /run/pdp/pdp.sock \
-  --path /upstreams/github/repos/OWNER/REPOSITORY
+  --url https://api.github.com/repos/OWNER/REPOSITORY
 ```
 
-A caller whose UID is not in `allowed_uids` gets HTTP 403 and no credential is read.
+`pdp request` sends the full URL in the request line, and PDP makes the TLS connection to GitHub itself. No interception CA is needed. A caller whose UID is not in `allowed_uids` gets HTTP 403 and no credential is read.

@@ -2,7 +2,9 @@
 
 Read one GitHub repository, for named SPIFFE workloads over mTLS. Includes a Kubernetes manifest.
 
-PDP gets its own certificate and the trust bundle from the SPIFFE Workload API and verifies the caller's certificate on every request. The policy then decides which SPIFFE IDs are allowed. Every workload in a trusted domain can connect, so the policy must name exact IDs.
+PDP gets its own certificate and the trust bundle from the SPIFFE Workload API and verifies the caller's certificate on every request. The policy then decides which SPIFFE IDs are allowed and which destinations they may reach. Every workload in a trusted domain can connect, so the policy must name exact IDs. `pdp.json` attaches the `github-worker` binding and the REST schema to `api.github.com`.
+
+A caller sends absolute-form requests (`GET https://api.github.com/... HTTP/1.1`) over its mTLS connection, and PDP makes the TLS connection to GitHub. This pack has no `interception` CA, so a `CONNECT` request is refused. `pdp request` speaks only to a Unix socket and cannot be used against this listener.
 
 ## Edit
 
