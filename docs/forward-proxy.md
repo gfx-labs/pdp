@@ -6,7 +6,7 @@ Status: proposal. Nothing here is implemented. The current gateway serves `/upst
 
 PDP becomes an explicit forward proxy for any HTTP destination. Every request is authorized by Rego with the verified caller identity. A destination with no protocol plugin is still usable through host, port, method and path rules. A plugin adds operations, fields and resources to the same policy input when finer rules are wanted.
 
-Not in scope: transparent steering by DNS or TPROXY, non-HTTP protocols other than opaque tunnels, response filtering, and callers that can present neither a SPIFFE certificate nor a Unix peer credential.
+Not in scope: TPROXY steering, non-HTTP protocols other than opaque tunnels, and response filtering beyond the credential scan.
 
 ## Caller transports
 
@@ -109,15 +109,57 @@ allow if {
 
 `certificate_file` holds the interception CA certificate followed by any intermediates up to, but not including, the root the workloads trust. A binding on a `tunnel` upstream is a configuration error.
 
+## DNS steering
+
+For clients that cannot be given a proxy setting, PDP runs a DNS server and transparent listeners on ports 80 and 443.
+
+- **Only configured names are intercepted.** A name is answered with PDP's address when it is a host in `upstreams` or matches a pattern in `dns.intercept`. PDP does not claim names nobody configured.
+- **Everything else follows one setting.** `dns.unlisted` is `forward` (resolve through the real resolver, the default) or `refuse` (answer REFUSED). `refuse` is the deny-all rule. It is not enforcement on its own, because a client can connect to an IP literal, so the egress `NetworkPolicy` is still required.
+- **Identity is weaker.** A transparently steered client believes it is talking to the destination and presents no client certificate. Rego receives `auth_method: "transparent"` and `identity.ip`. The policy has to map source addresses to workloads, and that mapping is only as good as the network's protection against address spoofing.
+- **Destination comes from SNI or `Host`**, never from the address the client connected to. The transparent TLS listener always intercepts, so it needs the interception CA.
+
+```json
+"dns": {
+  "listen": ":53",
+  "address": "10.16.0.1",
+  "intercept": ["*.githubusercontent.com"],
+  "unlisted": "forward"
+}
+```
+
 ## Credentials
 
-Unchanged in principle: the binding is selected by the administrator's upstream entry, never by the caller, and the adapter runs only after allow. Caller-supplied `Authorization` and `Proxy-Authorization` headers are removed before injection. There are no placeholder tokens, because the caller's identity already selects the binding.
+The adapter runs only after allow, and the caller never chooses a credential by itself. Caller-supplied `Authorization`, `Proxy-Authorization` and every header the binding injects are removed before injection.
+
+### Placeholders and several accounts on one host
+
+A client such as Jcode needs something in its credential slot to start, and one provider endpoint can serve several accounts. Both are handled the same way:
+
+- An upstream may list several bindings. Each binding may declare a `placeholder`, an opaque non-secret string given to the workload in place of the real token.
+- PDP reads the placeholder from the request's auth fields and uses it only to pick the candidate binding, which reaches Rego as `input.binding`. With one binding on the upstream, that binding is the candidate and no placeholder is needed.
+- The placeholder is a routing hint, not authorization. Rego must explicitly allow that binding for the verified identity, for example from the run's grants in OPA data. A caller that sends another account's placeholder is denied unless policy grants it that binding.
+- No matching placeholder on a multi-binding upstream means no candidate, so nothing is injected.
+
+```rego
+allow if {
+	input.destination.host == "api.anthropic.com"
+	input.binding in data.run_grants[input.identity.spiffe_id].bindings
+}
+```
+
+### Subscription auth
+
+- **Every auth field is replaced.** An adapter result can set several headers, for example a bearer token and an account ID header. The caller's values for all of them are dropped, so a placeholder or a stale account header never reaches the provider.
+- **PDP owns the refresh.** Real access and refresh tokens stay in the binding's state file and are refreshed by the adapter. A refresh request from the client to a configured `token_paths` entry is answered locally with the placeholders and an expiry. It is never forwarded, so no provider response carrying real tokens reaches the workload.
+- **Responses are scanned for the real credential**, including streamed ones (see below).
+
+Untested assumptions: that Jcode accepts each provider's placeholder in the format that provider's client code expects, and that DNS and TLS interception cover every connection a subscription client makes.
 
 ## WebSocket and streaming
 
 The upgrade request is authorized and injected like any other request, then frames are relayed without inspection. Streaming responses are relayed as they arrive. Both are bounded by idle timeout, maximum duration and the concurrency limit, and the audit event records bytes in each direction.
 
-The reflected-credential scan needs a buffered body. It stays for upstreams with a plugin and for buffered JSON responses, and does not apply to upgraded or streamed responses. An upstream that echoes its credential on a stream would not be caught.
+Buffered responses are scanned whole for the injected credential, as today. Streamed responses on an upstream with a binding get a sliding-window scan for the same byte patterns, since subscription model APIs answer with event streams. Upgraded WebSocket frames are not scanned, so an upstream that echoes its credential inside a WebSocket would not be caught.
 
 ## Kubernetes and cert-manager
 
@@ -170,4 +212,6 @@ Outside Kubernetes the same two files come from any CA tooling. The systemd pack
 2. `CONNECT` with `tunnel` mode.
 3. `CONNECT` with `intercept` mode, leaf minting and CA reload.
 4. WebSocket upgrade and streamed responses.
-5. Kubernetes pack with cert-manager, trust-manager and NetworkPolicy manifests, validated against a real cluster only with explicit authorization.
+5. DNS server and transparent listeners.
+6. Several bindings per upstream, placeholders, multi-header adapter results, local token-endpoint answers and the streamed credential scan.
+7. Kubernetes pack with cert-manager, trust-manager and NetworkPolicy manifests, validated against a real cluster only with explicit authorization.
