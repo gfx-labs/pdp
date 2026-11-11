@@ -612,6 +612,9 @@ func (g *Gateway) exchange(w http.ResponseWriter, r, outer *http.Request, fixed 
 		return nil
 	}
 	x.event.Principal = identity.ID()
+	if r.URL.Path == "" && r.Method != http.MethodConnect {
+		r.URL.Path = "/"
+	}
 	if r.Method == http.MethodConnect {
 		if fixed != nil {
 			x.fail(http.StatusBadRequest, "invalid_request")

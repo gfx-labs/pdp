@@ -7,7 +7,8 @@ default allow := false
 allow if {
 	input.identity.auth_method == "unix"
 	input.identity.uid == data.peer_uid
-	input.provider == "linear"
+	input.destination.host == "example.com"
+	input.plugin == "linear"
 	input.binding == "installation"
 	input.schema_digest == "sha256:45be35e9a86ff65c6558a58ea67eebd69d2ee75166b0f4da1385aa5b856aec68"
 	input.http.method == "POST"

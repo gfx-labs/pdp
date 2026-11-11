@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/gfx-labs/pdp/pkg/auth"
 	"github.com/gfx-labs/pdp/pkg/config"
 	"github.com/gfx-labs/pdp/pkg/credential"
 )
@@ -69,7 +68,7 @@ func TestAuthoredLinearRestrictions(t *testing.T) {
 	cfg := config.Config{
 		Version: config.Version, Revision: "linear-authored-v1", Transport: config.Transport{UnixSocket: h.socket, SocketMode: "0600"},
 		Schemas:     map[string]config.Schema{"linear": {Protocol: "graphql", File: schemaPath}},
-		Routes:      []config.Route{{Provider: "linear", Binding: "installation", UpstreamURL: h.endpoint + "/graphql", Schema: "linear"}},
+		Upstreams:   []config.Upstream{{Host: testHost, Port: h.port, Binding: "installation", Schema: "linear"}},
 		Credentials: credential.Config{Providers: map[string]credential.ProviderConfig{"linear": {Script: "def acquire(ctx):\n    return static(secret(\"token\"))\n"}}, Bindings: map[string]credential.BindingConfig{"installation": {Provider: "linear", Secrets: map[string]credential.SecretSource{"token": {File: "token"}}}}},
 		Policy:      config.Policy{Modules: []string{"linear.rego"}, Data: []string{"data.json"}},
 	}
@@ -85,7 +84,9 @@ func TestAuthoredLinearRestrictions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := NewSnapshot(SnapshotConfig{Version: loaded.Config.Revision, Authenticator: auth.NewUnix(), Policy: loaded.Policy, Credentials: loaded.Credentials, Routes: []Route{{Provider: "linear", Binding: "installation", UpstreamURL: h.endpoint + "/graphql", GraphQL: loaded.GraphQL["linear"]}}})
+	up := h.upstream()
+	up.Plugin, up.GraphQL = "linear", loaded.GraphQL["linear"]
+	snapshot, err := NewSnapshot(SnapshotConfig{Version: loaded.Config.Revision, Authenticator: testAuth{}, Policy: loaded.Policy, Credentials: loaded.Credentials, Upstreams: []Upstream{up}})
 	if err != nil {
 		loaded.Close()
 		t.Fatal(err)
@@ -139,7 +140,7 @@ func TestAuthoredLinearRestrictions(t *testing.T) {
 			}
 			beforeCalls := calls.Load()
 			beforeStats := h.g.Metrics().Credentials
-			status, _, response := h.request(t, "POST", "/upstreams/linear/graphql", string(body), http.Header{})
+			status, _, response := h.request(t, "POST", "/graphql", string(body), http.Header{})
 			if status != test.status {
 				t.Fatalf("status=%d want=%d body=%s", status, test.status, response)
 			}
