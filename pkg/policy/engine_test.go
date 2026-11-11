@@ -15,9 +15,10 @@ import (
 
 func request() policy.Input {
 	return policy.Input{
-		Version: policy.InputVersion, Identity: policy.Identity{ID: "worker"},
-		Provider: "github", Binding: "installation", SchemaDigest: "sha256:reviewed",
-		HTTP:       policy.HTTPInput{Method: "POST", Path: "/api"},
+		Version: policy.InputVersion, Identity: policy.Identity{ID: "worker"}, Protocol: policy.ProtocolHTTP,
+		Destination: policy.Destination{Scheme: "https", Host: "api.example.test", Port: 443},
+		Plugin:      "github", Binding: "installation", SchemaDigest: "sha256:reviewed",
+		HTTP:       &policy.HTTPInput{Method: "POST", Path: "/api"},
 		Operations: []policy.OperationInput{{ID: "issues/get"}},
 	}
 }
@@ -51,7 +52,7 @@ func TestAuthoredFullAndRestrictedPolicies(t *testing.T) {
 		default allow := false
 		allow if {
 			input.identity.id == "worker"
-			input.provider == "github"
+			input.plugin == "github"
 			input.binding == "installation"
 		}
 		matched_rules contains "full-access" if allow
@@ -70,7 +71,7 @@ func TestAuthoredFullAndRestrictedPolicies(t *testing.T) {
 		default allow := false
 		allow if {
 			input.identity.id == "worker"
-			input.provider == "github"
+			input.plugin == "github"
 			input.binding == "installation"
 			input.schema_digest == "sha256:reviewed"
 			every operation in input.operations {
@@ -151,7 +152,7 @@ func TestGraphQLRepeatedOccurrences(t *testing.T) {
 		}
 	`, nil)
 	in := request()
-	in.Provider = "linear"
+	in.Plugin = "linear"
 	in.Operations = []policy.OperationInput{{ID: "Query.issue", Resources: []policy.Resource{{Type: "issue", ID: "APP-1"}}}}
 	in.GraphQL = []policy.FieldOccurrence{
 		{Coordinate: "Query.issue", Path: []string{"first"}, ResponsePath: []string{"first"}, Alias: "first", Arguments: map[string]any{"id": "APP-1"}},
@@ -316,10 +317,19 @@ func TestFrozenSnapshotConcurrentEvaluationAndCancellation(t *testing.T) {
 func TestTrustedEnvelopeFailsClosed(t *testing.T) {
 	e := engine(t, "allow := true", nil)
 	for name, mutate := range map[string]func(*policy.Input){
-		"version":             func(in *policy.Input) { in.Version = "v2" },
-		"identity":            func(in *policy.Input) { in.Identity.ID = "" },
-		"provider":            func(in *policy.Input) { in.Provider = "" },
-		"binding":             func(in *policy.Input) { in.Binding = "" },
+		"version":          func(in *policy.Input) { in.Version = "pdp.authz/v1" },
+		"identity":         func(in *policy.Input) { in.Identity.ID = "" },
+		"protocol":         func(in *policy.Input) { in.Protocol = "ftp" },
+		"host":             func(in *policy.Input) { in.Destination.Host = "" },
+		"port":             func(in *policy.Input) { in.Destination.Port = 0 },
+		"scheme":           func(in *policy.Input) { in.Destination.Scheme = "tcp" },
+		"no-http":          func(in *policy.Input) { in.HTTP = nil },
+		"plugin-no-digest": func(in *policy.Input) { in.SchemaDigest = "" },
+		"digest-no-plugin": func(in *policy.Input) { in.Plugin = "" },
+		"tunnel-with-binding": func(in *policy.Input) {
+			*in = policy.Input{Version: policy.InputVersion, Identity: in.Identity, Protocol: policy.ProtocolTunnel, Binding: "installation",
+				Destination: policy.Destination{Scheme: "tcp", Host: "db.example.test", Port: 5432}}
+		},
 		"no-operations":       func(in *policy.Input) { in.Operations = nil },
 		"operation-id":        func(in *policy.Input) { in.Operations[0].ID = "" },
 		"graphql-coordinate":  func(in *policy.Input) { in.GraphQL = []policy.FieldOccurrence{{}} },
