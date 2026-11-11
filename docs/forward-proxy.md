@@ -73,7 +73,17 @@ When an upstream names a plugin, the plugin validates the request against its pi
 
 ## Runtime configuration
 
-`routes` is replaced by `upstreams`, matched by exact host and port. A destination with no entry is still evaluated by Rego with the generic input, in `intercept` mode and with no credential.
+`routes` is replaced by `upstreams`, matched by exact host and port. An upstream entry only attaches a binding, plugin or TLS mode. It is not an allowlist. A destination with no entry is still evaluated by Rego with the generic input, in `intercept` mode and with no credential, so the policy is the only place that accepts or refuses a host. A policy can match by suffix or pattern:
+
+```rego
+allow if {
+	input.identity.spiffe_id in agents
+	glob.match("*.githubusercontent.com", ["."], input.destination.host)
+	input.http.method in {"GET", "HEAD"}
+}
+```
+
+`input.destination.host` is lower-cased with any trailing dot removed, so a pattern cannot be bypassed by spelling.
 
 ```json
 {
@@ -152,8 +162,7 @@ Outside Kubernetes the same two files come from any CA tooling. The systemd pack
 ## Open questions
 
 1. Many HTTP libraries cannot present a client certificate to an HTTPS proxy. Workloads using them need the Unix socket or a small local forwarder that holds the SVID. Whether PDP should ship that forwarder is undecided.
-2. Whether a destination with no `upstreams` entry should default to `intercept`, as written here, or be refused before Rego.
-3. Whether `pdp.authz/v1` input stays accepted for one release so existing packs keep working, or packs move to v2 in the same change.
+2. Whether `pdp.authz/v1` input stays accepted for one release so existing packs keep working, or packs move to v2 in the same change.
 
 ## Order of work
 
