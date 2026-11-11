@@ -28,11 +28,37 @@ manager, err := credential.New(credential.Config{
 })
 ```
 
-Check `err`, call `Close` when retiring the manager, and use `Validate(Request)` while building the gateway snapshot. `New` compiles source without contacting providers or reading secrets. Call `Get(ctx, Request{Provider, Binding, Scopes})` only after authorization. Call `Result.Apply(upstreamHeaders)` only for the fixed authorized upstream. On upstream authentication failure, call `Invalidate` without automatically replaying the request. Check `Result.ContainsSecret` on bounded response bodies and forwarded headers before releasing them. Error bodies should remain generic. Reflection detection covers raw credential material, Basic encoding, and JSON string escapes, not arbitrary encodings or a malicious upstream covert channel.
+Check `err`, call `Close` when retiring the manager, and use `Validate(Request)` while building the gateway snapshot. `New` compiles source without contacting providers or reading secrets. Call `Get(ctx, Request{Provider, Binding, Scopes})` only after authorization. Before `Result.Apply(upstreamHeaders)`, delete the caller's value for `Result.HeaderName()` (`Authorization`, or the custom header of a `header` result) so a caller-supplied value or placeholder never reaches the provider. Call `Apply` only for the authorized destination. On upstream authentication failure, call `Invalidate` without automatically replaying the request.
 
-`Result` and `Manager` formatting is redacted. Results serialize only kind and expiry. `Apply` is deliberately the only operation that exports an authentication value. Never log applied headers. Reload with a newly validated manager and immutable route bindings. The gateway owns the retiring manager's lifecycle.
+Check `Result.ContainsSecret` on bounded response bodies and forwarded headers before releasing them. It covers raw credential material, Basic encoding, and JSON string escapes, not arbitrary encodings or a malicious upstream covert channel. For a response relayed as it arrives, use `Result.Scanner()`. `Scanner.Next(chunk)` returns the bytes that are safe to send and reports a match. It holds back only a trailing run that could be the start of the credential, so a credential split across reads is still caught and no prefix of it is released. Call `Scanner.Flush()` when the response ends to release the held bytes. The scanner matches the raw token, `Bearer <token>` and the Basic encodings only. It does not catch JSON-escaped or compressed forms, so a caller that streams must refuse compressed responses itself. Error bodies should remain generic.
 
-In `pdp.json` the same structure sits under `credentials` as `providers` and `bindings`, with snake_case keys such as `linear_actor`, `state_file` and `systemd_credential`. A provider takes exactly one of `script` and `script_file`. The `pkg/config` loader reads `script_file` relative to the configuration file and passes its content to `New` as `Script`, so `New` itself rejects `ScriptFile`. The files in `adapters/` are the same adapters the packs under `examples/packs` ship as `adapter.star`: `static.star` in `minimal`, `github-read`, `github-spiffe` and `systemd`, `github_app.star` in `github-comment`, `linear_client_credentials.star` in `linear-read` and `linear_refresh.star` in `linear-comment`.
+`Manager.Binding(name)` returns a `Binding` with the non-secret routing facts of one configured binding: `Provider`, `Placeholder` and `Headers`. The gateway uses it to choose among several bindings on one destination and to set fixed headers. It never returns secret material.
+
+`Result` and `Manager` formatting is redacted. Results serialize only kind and expiry. `Apply` is deliberately the only operation that exports an authentication value. Never log applied headers. Reload with a newly validated manager and immutable upstream bindings. The gateway owns the retiring manager's lifecycle.
+
+## Placeholders and fixed headers
+
+A binding may set two non-secret fields:
+
+- `Placeholder` (`placeholder` in `pdp.json`): a string the workload holds in place of the real credential. It must be 8 to 256 bytes with no spaces, commas, double quotes, backslashes or control characters. It selects a candidate binding when one destination has several, and is returned by the gateway's local token path answer. It authorizes nothing. Policy still decides whether the caller may use that binding.
+- `Headers` (`headers`): fixed request headers sent with this credential, such as an account ID. Names must be HTTP tokens and cannot be `Host`, `Content-Length`, `Connection`, `Proxy-Authorization` or `Transfer-Encoding`. `ValidHeader` reports whether a name is allowed. Values are at most 1024 bytes with no control characters. The gateway replaces any caller value for these names.
+
+```json
+"bindings": {
+  "team-account": {
+    "provider": "provider",
+    "placeholder": "pdp-placeholder-team-account",
+    "headers": {"X-Account-Id": "REPLACE_TEAM_ACCOUNT_ID"},
+    "parameters": {"client_id": "REPLACE_CLIENT_ID"},
+    "secrets": {"client_secret": {"file": "/run/secrets/provider-client-secret"}},
+    "state_file": "/var/lib/pdp/team-account/state.json"
+  }
+}
+```
+
+This is the binding shape the `subscription` pack uses. Whether a real provider client accepts a placeholder in place of its token has not been tested.
+
+In `pdp.json` the same structure sits under `credentials` as `providers` and `bindings`, with snake_case keys such as `linear_actor`, `state_file`, `systemd_credential`, `placeholder` and `headers`. A provider takes exactly one of `script` and `script_file`. The `pkg/config` loader reads `script_file` relative to the configuration file and passes its content to `New` as `Script`, so `New` itself rejects `ScriptFile`. The files in `adapters/` are the same adapters the packs under `examples/packs` ship as `adapter.star`: `static.star` in `minimal`, `github-read`, `github-spiffe` and `systemd`, `github_app.star` in `github-comment`, `linear_client_credentials.star` in `linear-read` and `linear_refresh.star` in `linear-comment`.
 
 ## Adapter capabilities
 

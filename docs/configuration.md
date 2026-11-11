@@ -89,6 +89,8 @@ Without `interception`, PDP serves absolute-form requests, `CONNECT` to tunnel u
 | `unlisted` | `forward` (default) or `refuse`. |
 | `resolver` | `ip:port` of the real resolver. Required with `forward`, not allowed with `refuse`. |
 
+`pdp validate` checks only that `listen` is set and that `unlisted` and `resolver` agree. The `address`, `resolver` and `intercept` values are parsed when `pdp serve` starts, and a bad value makes it exit then.
+
 A steered name gets an authoritative answer with a 30-second TTL. Any other name is forwarded unchanged to `resolver` and its answer returned unchanged, or answered `REFUSED` when `unlisted` is `refuse`. DNS is UDP only. There is no TCP listener, so a client that retries a truncated answer over TCP gets nothing from PDP. At most 256 queries are handled at once. Further packets are dropped and the client retries.
 
 `refuse` is not enforcement by itself, since a client can connect to an IP literal. Block direct egress from the workload. The set of steered names is fixed at startup. A reload that changes it is rejected.
@@ -127,15 +129,17 @@ Missing secret files and an unreadable interception CA are therefore startup or 
 
 | Form | Listener | Destination taken from |
 | --- | --- | --- |
-| Absolute-form, `GET https://host/path HTTP/1.1` | Unix socket, SPIFFE | The request URL. PDP makes the TLS connection. |
-| `CONNECT host:port` | Unix socket, SPIFFE | The `CONNECT` target. A request inside that names another host or port in `Host` or its URL is refused with `400`. |
+| Absolute-form, `GET https://host/path HTTP/1.1` | Any | The request URL. PDP makes the TLS connection. |
+| `CONNECT host:port` | Any | The `CONNECT` target. A request inside that names another host or port in `Host` or its URL is refused with `400`. |
 | Origin-form, `GET /path` | Transparent only | `Host`. On TLS, `Host` must equal the SNI name, or the request is refused with `400`. |
+
+The Unix socket and SPIFFE listeners refuse origin-form requests with `400`. Transparent listeners also accept absolute-form and `CONNECT`, with the caller still identified by source address only.
 
 Inside an intercepted `CONNECT`, a first byte of `0x16` starts TLS with a leaf for the `CONNECT` host. Anything else is read as plain HTTP with scheme `http`. Each request inside is authenticated and authorized on its own, against the snapshot that is current when that request starts.
 
 Everything is HTTP/1.1. HTTP/2 is not offered to callers, and upstream connections negotiate `http/1.1` only. Each upstream request uses a fresh connection.
 
-**Schema-backed upstreams** keep the strict handling of the earlier route-based gateway. The method must be GET, HEAD, POST, PUT, PATCH or DELETE. The request is validated against the pinned schema and refused with `400` before policy on any ambiguity: encoded or dot paths, doubled slashes, duplicate query keys, unknown body fields, non-JSON bodies, compression, upgrades or trailers. PDP builds a fresh request with only `Accept`, `Accept-Encoding: identity`, `User-Agent`, `Content-Type` and the credential, so no caller header is forwarded. The response must be a 2xx, 4xx or 5xx JSON body within `max_response_bytes`, without compression. A redirect is refused as `invalid_upstream_response`. The body is buffered, scanned for the credential, and returned with locally built headers. A GraphQL upstream accepts only POST to its `graphql_path` and refuses subscriptions and batches.
+**Schema-backed upstreams** keep the strict handling of the earlier route-based gateway. The method must be GET, HEAD, POST, PUT, PATCH or DELETE. The request is validated against the pinned schema and refused with `400` before policy on any ambiguity: encoded or dot paths, doubled slashes, duplicate query keys, unknown body fields, non-JSON bodies, compression, upgrades or trailers. PDP builds a fresh request with only `Accept`, `Accept-Encoding: identity`, `User-Agent`, `Content-Type`, the binding's fixed `headers` and the credential, so no caller header is forwarded. The response must be a 2xx, 4xx or 5xx JSON body within `max_response_bytes`, without compression. A redirect is refused as `invalid_upstream_response`. The body is buffered, scanned for the credential, and returned with locally built headers. A GraphQL upstream accepts only POST to its `graphql_path` and refuses subscriptions and batches.
 
 **Every other destination** is relayed as a stream. Any upper-case method except `CONNECT`, any content type and any body are forwarded. Dot segments in the path, NUL or CR/LF in header values, more than 128 headers, trailers, an `Upgrade` other than `websocket`, and headers over `max_header_bytes` are refused with `400`. Hop-by-hop headers are removed in both directions. Other caller headers are forwarded, including the caller's own `Authorization` when no credential is injected. The response streams back as it arrives, with its status, content type and encoding, bounded by `stream_timeout`. A redirect is returned to the caller and never followed. A WebSocket upgrade is authorized with `protocol` `websocket`, the upstream's `101` is relayed, and bytes then flow both ways without frame inspection.
 

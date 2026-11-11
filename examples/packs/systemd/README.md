@@ -1,6 +1,6 @@
 # systemd
 
-The [minimal](../minimal/README.md) policy, run as a socket-activated systemd service with the token supplied as a systemd credential.
+The [minimal](../minimal/README.md) policy, run as a socket-activated systemd service with the token supplied as a systemd credential. Callers send absolute-form requests, such as `pdp request --url https://api.github.com/repos/OWNER/REPOSITORY`, to the socket.
 
 - `pdp.socket` creates `/run/pdp/pdp.sock` owned by `pdp`, group `pdp-clients`, mode `0660`.
 - `pdp.service` runs as the `pdp` account, loads `/etc/pdp/secrets/github-token` as the credential `github-token`, and reloads on `systemctl reload`.
@@ -35,4 +35,4 @@ After changing `policy.rego`, set a new `revision` in `pdp.json` and run `system
 
 ## Status
 
-Validated offline only. The units have not been installed as part of testing. Socket activation itself is covered by a test that passes an inherited socket to the real CLI.
+Validated offline only. The units have not been installed as part of testing. Socket activation itself is covered by a test that passes an inherited socket to the real CLI. The units do not grant `CAP_NET_BIND_SERVICE`, so this pack cannot serve the transparent listeners or DNS on ports below 1024 as shipped.

@@ -1,6 +1,6 @@
 # github-comment
 
-Read one GitHub repository and create issue comments in it, for named Unix UIDs. Uses a GitHub App installation token.
+Read one GitHub repository and create issue comments in it, for named Unix UIDs. Uses a GitHub App installation token. `pdp.json` attaches the `github-app-repo` binding and the REST schema to `api.github.com`.
 
 The policy allows comments on every issue in the repository. To limit it to named issues, add a check on `input.http.path_params.issue_number` in `policy.rego`.
 
@@ -28,7 +28,7 @@ Reads work as in [github-read](../github-read/README.md). A comment is a provide
 # Writes to GitHub. Set the approved issue number first.
 : "${PDP_APPROVED_DISPOSABLE_ISSUE_NUMBER:?Set the approved issue number}"
 bin/pdp request --socket /run/pdp/pdp.sock --method POST \
-  --path "/upstreams/github/repos/APPROVED_OWNER/APPROVED_REPOSITORY/issues/$PDP_APPROVED_DISPOSABLE_ISSUE_NUMBER/comments" \
+  --url "https://api.github.com/repos/APPROVED_OWNER/APPROVED_REPOSITORY/issues/$PDP_APPROVED_DISPOSABLE_ISSUE_NUMBER/comments" \
   --body examples/packs/github-comment/requests/create-comment.json
 ```
 

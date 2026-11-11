@@ -1,6 +1,6 @@
 # linear-comment
 
-Read named Linear issues and comment on them, for named Unix UIDs. Uses an existing Linear OAuth installation through its refresh token, with scopes `read` and `comments:create`.
+Read named Linear issues and comment on them, for named Unix UIDs. Uses an existing Linear OAuth installation through its refresh token, with scopes `read` and `comments:create`. `pdp.json` attaches the `linear-installation` binding and the `linear` GraphQL schema to `api.linear.app`.
 
 ## Edit
 
@@ -18,7 +18,7 @@ Read named Linear issues and comment on them, for named Unix UIDs. Uses an exist
 
 Its directory must be private to the daemon (mode `0700`) and writable, and the file mode `0600`. PDP rewrites it on every refresh. If a refresh outcome is uncertain the file is marked `recovery_required` and PDP stops using it. Reauthorize through Linear in that case. Do not clear the marker and replay an old refresh token.
 
-To use client credentials instead, take `adapter.star` and the binding from [linear-read](../linear-read/README.md) and add the `comments:create` scope to the route and the binding.
+To use client credentials instead, take `adapter.star` and the binding from [linear-read](../linear-read/README.md) and add the `comments:create` scope to the `api.linear.app` upstream entry and to the binding.
 
 ## Check
 
@@ -33,7 +33,7 @@ Reads work as in [linear-read](../linear-read/README.md). A comment is a provide
 ```sh
 # Writes to Linear.
 bin/pdp request --socket /run/pdp/pdp.sock --method POST \
-  --path /upstreams/linear/graphql \
+  --url https://api.linear.app/graphql \
   --body examples/packs/linear-comment/requests/create-comment.json
 ```
 
