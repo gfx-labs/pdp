@@ -5,16 +5,22 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,7 +37,7 @@ const packRoot = "../../examples/packs"
 
 type packRequest struct {
 	method string
-	path   string
+	url    string
 	body   string // file under the pack's requests directory
 	status int
 }
@@ -39,11 +45,12 @@ type packRequest struct {
 // Owns the claim that each checked-in pack is usable as shipped. It serves the
 // pack's own policy.rego, schema and adapter on a real Unix socket against a
 // local TLS provider, changing only deployment values: socket, secret paths,
-// provider URLs and the allowed UID.
+// token endpoints and the allowed UID. Upstream hosts stay as shipped. The
+// test resolves them to the local provider, which holds a certificate for them.
 func TestPacksServeTheirRequests(t *testing.T) {
-	const repo = "/upstreams/github/repos/APPROVED_OWNER/APPROVED_REPOSITORY"
-	const other = "/upstreams/github/repos/UNAPPROVED_OWNER/APPROVED_REPOSITORY"
-	const linear = "/upstreams/linear/graphql"
+	const repo = "https://api.github.com/repos/APPROVED_OWNER/APPROVED_REPOSITORY"
+	const other = "https://api.github.com/repos/UNAPPROVED_OWNER/APPROVED_REPOSITORY"
+	const linear = "https://api.linear.app/graphql"
 	packs := map[string][]packRequest{
 		"minimal": {
 			{"GET", repo, "", 200},
@@ -96,7 +103,7 @@ func servePack(t *testing.T, name string, allowedUID int, requests []packRequest
 	}
 	const token = "local-pack-test-token"
 	var exchanges, forwarded atomic.Int64
-	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	provider := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/access_tokens"):
@@ -114,6 +121,9 @@ func servePack(t *testing.T, name string, allowedUID int, requests []packRequest
 			w.WriteHeader(500)
 		}
 	}))
+	certificate, root := providerCertificate(t, "api.github.com", "api.linear.app")
+	provider.TLS = &tls.Config{Certificates: []tls.Certificate{certificate}}
+	provider.StartTLS()
 	defer provider.Close()
 
 	// Deployment values only. Policy, schema and adapter stay as shipped.
@@ -142,17 +152,10 @@ func servePack(t *testing.T, name string, allowedUID int, requests []packRequest
 	socket := filepath.Join(dir, "pdp.sock")
 	document["transport"] = map[string]any{"unix_socket": socket, "socket_mode": "0600"}
 	ca := filepath.Join(dir, "ca.pem")
-	if err = os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: provider.Certificate().Raw}), 0600); err != nil {
+	if err = os.WriteFile(ca, root, 0600); err != nil {
 		t.Fatal(err)
 	}
 	document["ca_file"] = ca
-	for _, entry := range document["routes"].([]any) {
-		route := entry.(map[string]any)
-		route["upstream_url"] = provider.URL
-		if route["provider"] == "linear" {
-			route["upstream_url"] = provider.URL + "/graphql"
-		}
-	}
 	credentials := document["credentials"].(map[string]any)
 	for providerName, entry := range credentials["providers"].(map[string]any) {
 		endpoints, ok := entry.(map[string]any)["endpoints"].(map[string]any)
@@ -206,7 +209,18 @@ func servePack(t *testing.T, name string, allowedUID int, requests []packRequest
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := gateway.New(s, gatewayOptions(loaded))
+	options, err := gatewayOptions(loaded, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerAddress := provider.Listener.Addr().String()
+	options.Lookup = func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	options.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, providerAddress)
+	}
+	g, err := gateway.New(s, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,11 +232,6 @@ func servePack(t *testing.T, name string, allowedUID int, requests []packRequest
 	server := gateway.NewHTTPServer("", g)
 	go server.Serve(listener)
 	defer server.Close()
-	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
-	}}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 	for _, want := range requests {
 		var body []byte
 		if want.body != "" {
@@ -230,7 +239,7 @@ func servePack(t *testing.T, name string, allowedUID int, requests []packRequest
 				t.Fatal(err)
 			}
 		}
-		request, err := http.NewRequest(want.method, "http://pdp"+want.path, bytes.NewReader(body))
+		request, err := http.NewRequest(want.method, want.url, bytes.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -238,13 +247,13 @@ func servePack(t *testing.T, name string, allowedUID int, requests []packRequest
 			request.Header.Set("Content-Type", "application/json")
 		}
 		exchangesBefore, forwardedBefore := exchanges.Load(), forwarded.Load()
-		response, err := client.Do(request)
+		response, err := proxyRequest(socket, request)
 		if err != nil {
 			t.Fatal(err)
 		}
 		data, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		label := fmt.Sprintf("%s %s %s", want.method, want.path, want.body)
+		label := fmt.Sprintf("%s %s %s", want.method, want.url, want.body)
 		if response.StatusCode != want.status {
 			t.Fatalf("%s: HTTP %d, want %d: %s", label, response.StatusCode, want.status, data)
 		}
@@ -260,19 +269,51 @@ func servePack(t *testing.T, name string, allowedUID int, requests []packRequest
 	}
 }
 
-// The SPIFFE and systemd packs need a Workload API and systemd to serve, so
-// this checks what can be checked offline: they load, and the SPIFFE policy
-// separates the named workload from a neighbor in the same trust domain.
+// providerCertificate is a self-signed certificate for the pack's upstream
+// hosts and for loopback, where the token endpoints are pointed.
+func providerCertificate(t *testing.T, hosts ...string) (tls.Certificate, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "pdp pack test provider"},
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), DNSNames: hosts, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// These packs need a Workload API, systemd, an interception CA or a cluster to
+// serve, so this checks what can be checked offline: they load, and each
+// documented explain input gets the decision its README states.
 func TestDeploymentPacksValidate(t *testing.T) {
 	t.Setenv("CREDENTIALS_DIRECTORY", "/run/credentials/pdp.service")
-	for _, name := range []string{"github-spiffe", "systemd"} {
+	for _, name := range []string{"github-spiffe", "systemd", "egress", "subscription", "kubernetes"} {
 		if err := run([]string{"validate", "--config", filepath.Join(packRoot, name, "pdp.json")}, io.Discard, io.Discard); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
-	for input, want := range map[string]bool{"approved-workload.json": true, "neighbor-workload.json": false} {
+	for input, want := range map[string]bool{
+		"github-spiffe/explain/approved-workload.json":         true,
+		"github-spiffe/explain/neighbor-workload.json":         false,
+		"egress/explain/read-package.json":                     true,
+		"egress/explain/database-tunnel.json":                  true,
+		"egress/explain/post-to-read-only-host.json":           false,
+		"egress/explain/resolves-to-metadata.json":             false,
+		"subscription/explain/granted-account.json":            true,
+		"subscription/explain/other-accounts-placeholder.json": false,
+		"subscription/explain/no-placeholder.json":             false,
+		"kubernetes/explain/spiffe-workload.json":              true,
+		"kubernetes/explain/steered-read.json":                 true,
+		"kubernetes/explain/steered-credentialed-host.json":    false,
+	} {
 		var out bytes.Buffer
-		if err := run([]string{"explain", "--config", filepath.Join(packRoot, "github-spiffe", "pdp.json"), "--input", filepath.Join(packRoot, "github-spiffe", "explain", input)}, &out, io.Discard); err != nil {
+		pack, _, _ := strings.Cut(input, "/")
+		if err := run([]string{"explain", "--config", filepath.Join(packRoot, pack, "pdp.json"), "--input", filepath.Join(packRoot, input)}, &out, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 		var decision struct {

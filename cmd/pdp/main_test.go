@@ -5,7 +5,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -93,7 +92,9 @@ func TestCLIProcess(t *testing.T) {
 
 // Owns CLI transport/lifecycle integration, not the external provider's API.
 // It proves authorization precedes credentials and live reload revokes a warm
-// cache on the actual Unix server, including caller-forged identity headers.
+// cache on the actual Unix server. A forged Authorization header is replaced.
+// A forged identity header is ordinary caller data on a schema-less upstream:
+// it is forwarded and grants nothing, which the final 403 shows.
 // The policy is a real Rego file, and revocation rewrites that file.
 func TestCLISocketReload(t *testing.T) {
 	for _, activated := range []bool{false, true} {
@@ -109,7 +110,7 @@ func TestCLISocketReload(t *testing.T) {
 			}
 			var reached atomic.Int32
 			upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != "Bearer local-transport-test-token" || r.URL.Path != "/repos/approved/repo" || r.Header.Get("X-PDP-Identity") != "" {
+				if r.Header.Get("Authorization") != "Bearer local-transport-test-token" || r.URL.Path != "/repos/approved/repo" {
 					w.WriteHeader(500)
 					return
 				}
@@ -122,10 +123,11 @@ func TestCLISocketReload(t *testing.T) {
 			if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Certificate().Raw}), 0600); err != nil {
 				t.Fatal(err)
 			}
+			port := upstream.Listener.Addr().(*net.TCPAddr).Port
 			policyPath := filepath.Join(dir, "policy.rego")
 			writePolicy := func(uid int) {
 				t.Helper()
-				source := fmt.Sprintf("package pdp.authz\n\nimport rego.v1\n\ndefault allow := false\n\nallow if {\n\tinput.identity.auth_method == \"unix\"\n\tinput.identity.uid == %d\n\tinput.provider == \"github\"\n\tinput.binding == \"local\"\n}\n", uid)
+				source := fmt.Sprintf("package pdp.authz\n\nimport rego.v1\n\ndefault allow := false\n\nallow if {\n\tinput.identity.auth_method == \"unix\"\n\tinput.identity.uid == %d\n\tinput.destination.host == \"127.0.0.1\"\n\tinput.destination.port == %d\n\tinput.binding == \"local\"\n}\n", uid, port)
 				if err := os.WriteFile(policyPath, []byte(source), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -133,7 +135,7 @@ func TestCLISocketReload(t *testing.T) {
 			writePolicy(os.Getuid())
 			cfg := config.Config{Version: config.Version, Revision: "initial", CAFile: ca,
 				Transport:   config.Transport{UnixSocket: socket, SocketMode: "0600"},
-				Routes:      []config.Route{{Provider: "github", Binding: "local", UpstreamURL: upstream.URL}},
+				Upstreams:   []config.Upstream{{Host: "127.0.0.1", Port: port, Binding: "local"}},
 				Credentials: credential.Config{Providers: map[string]credential.ProviderConfig{"github": {Script: "def acquire(request):\n    return static(secret(\"token\"))\n"}}, Bindings: map[string]credential.BindingConfig{"local": {Provider: "github", Secrets: map[string]credential.SecretSource{"token": {File: secret}}}}},
 				Policy:      config.Policy{Modules: []string{"policy.rego"}}}
 			path := filepath.Join(dir, "pdp.json")
@@ -220,17 +222,12 @@ func TestCLISocketReload(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatal("CLI readiness timeout")
 			}
-			transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
-			}}
-			defer transport.CloseIdleConnections()
-			client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
 			request := func(want int) {
 				t.Helper()
-				req, _ := http.NewRequest("GET", "http://pdp/upstreams/github/repos/approved/repo", nil)
+				req, _ := http.NewRequest("GET", upstream.URL+"/repos/approved/repo", nil)
 				req.Header.Set("Authorization", "Bearer forged")
 				req.Header.Set("X-PDP-Identity", "admin")
-				resp, err := client.Do(req)
+				resp, err := proxyRequest(socket, req)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -244,7 +241,7 @@ func TestCLISocketReload(t *testing.T) {
 				}
 			}
 			var response bytes.Buffer
-			if err := run([]string{"request", "--socket", socket, "--path", "/upstreams/github/repos/approved/repo"}, &response, io.Discard); err != nil {
+			if err := run([]string{"request", "--socket", socket, "--url", upstream.URL + "/repos/approved/repo"}, &response, io.Discard); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(response.String(), `"accepted":true`) {
@@ -298,4 +295,29 @@ func TestCLISocketReload(t *testing.T) {
 			}
 		})
 	}
+}
+
+// proxyRequest sends one absolute-form request on the gateway socket. Go's
+// Transport would send CONNECT for an https URL, so the request is written directly.
+func proxyRequest(socket string, request *http.Request) (*http.Response, error) {
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	request.Close = true
+	if err = request.WriteProxy(conn); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	response, err := http.ReadResponse(bufio.NewReader(conn), request)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	response.Body = struct {
+		io.Reader
+		io.Closer
+	}{response.Body, conn}
+	return response, nil
 }

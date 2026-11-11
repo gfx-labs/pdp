@@ -1,0 +1,6 @@
+{
+  "run_grants": {
+    "uid:1000": ["team-account"],
+    "uid:1001": ["team-account", "personal-account"]
+  }
+}

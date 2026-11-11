@@ -1,0 +1,51 @@
+{
+  "version": "pdp.config/v3",
+  "revision": "kubernetes-v1",
+  "transport": {
+    "spiffe": {
+      "address": ":8443",
+      "workload_api": "unix:///run/spire/sockets/agent.sock"
+    },
+    "transparent": {
+      "http": ":8080",
+      "https": ":8444"
+    }
+  },
+  "interception": {
+    "certificate_file": "/etc/pdp/ca/tls.crt",
+    "key_file": "/etc/pdp/ca/tls.key"
+  },
+  "dns": {
+    "listen": ":5353",
+    "address": "10.96.0.53",
+    "intercept": ["pypi.org", "files.pythonhosted.org"],
+    "unlisted": "forward",
+    "resolver": "10.96.0.10:53"
+  },
+  "upstreams": [
+    {
+      "host": "api.example.com",
+      "binding": "example-api"
+    }
+  ],
+  "credentials": {
+    "providers": {
+      "example": {
+        "script_file": "adapter.star"
+      }
+    },
+    "bindings": {
+      "example-api": {
+        "provider": "example",
+        "secrets": {
+          "token": {
+            "file": "/run/secrets/example-api-token"
+          }
+        }
+      }
+    }
+  },
+  "policy": {
+    "modules": ["policy.rego"]
+  }
+}

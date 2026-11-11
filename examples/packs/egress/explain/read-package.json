@@ -1,0 +1,7 @@
+{
+  "version": "pdp.authz/v2",
+  "identity": {"id": "uid:1000", "auth_method": "unix", "uid": 1000},
+  "protocol": "http",
+  "destination": {"scheme": "https", "host": "raw.githubusercontent.com", "port": 443, "addresses": ["185.199.108.133"]},
+  "http": {"method": "GET", "path": "/owner/repo/main/README.md"}
+}

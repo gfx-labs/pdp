@@ -11,17 +11,20 @@ A pack is a complete, runnable configuration in one directory. Copy it, edit the
 | [linear-comment](packs/linear-comment/README.md) | Unix UID | Read named issues and comment on them. Existing OAuth installation with refresh. |
 | [github-spiffe](packs/github-spiffe/README.md) | SPIFFE ID | Read one repository. Kubernetes manifest included. |
 | [systemd](packs/systemd/README.md) | Unix UID | Same policy as minimal, with service and socket units and a systemd credential. |
+| [egress](packs/egress/README.md) | Unix UID | Host, method and tunnel allowlist for any destination. No credential, no schema. |
+| [subscription](packs/subscription/README.md) | Unix UID | Two accounts on one host, picked by placeholder and granted per caller. Local token endpoint. |
+| [kubernetes](packs/kubernetes/README.md) | SPIFFE ID or pod IP | Credentialed calls for SVID holders, credential-free reads for DNS-steered pods. cert-manager, trust-manager and NetworkPolicy manifests. |
 
 ## What is in a pack
 
 | File | Purpose |
 | --- | --- |
 | `policy.rego` | The authorization policy. Allowed callers, repositories or issues are sets at the top of the file. |
-| `pdp.json` | Runtime wiring: socket or SPIFFE listener, route, schema file, credential binding, secret paths. |
+| `pdp.json` | Runtime wiring: listeners, upstreams, schema file, credential bindings, secret paths. An upstream entry attaches a credential, schema or TLS mode to a host. It does not allow the host. Only `policy.rego` does. |
 | `adapter.star` | Starlark that obtains the provider credential after the policy allows. |
 | `github-rest.json`, `linear.graphql` | The pinned request schema. Its digest is checked in `policy.rego`. |
 | `requests/` | Request bodies for `pdp request`, in packs that send one. |
-| `explain/` | Trusted inputs for `pdp explain`, to check the policy without serving. The GitHub packs have them. The Linear and systemd packs do not. |
+| `explain/` | Trusted inputs for `pdp explain`, to check the policy without serving. The Linear and systemd packs have none. |
 
 All paths in `pdp.json` except secrets and the socket are relative to the pack, so the directory can be moved as a unit.
 
