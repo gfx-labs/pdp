@@ -1,9 +1,8 @@
 {
-  "version": "pdp.authz/v1",
+  "version": "pdp.authz/v2",
   "identity": {"id": "uid:1000", "auth_method": "unix", "uid": 1000},
-  "provider": "github",
+  "protocol": "http",
+  "destination": {"scheme": "https", "host": "api.github.com", "port": 443},
   "binding": "github-local",
-  "schema_digest": "",
-  "http": {"method": "GET", "path": "/repos/APPROVED_OWNER/APPROVED_REPOSITORY"},
-  "operations": [{"id": "untyped:http:GET"}]
+  "http": {"method": "GET", "path": "/repos/APPROVED_OWNER/APPROVED_REPOSITORY"}
 }

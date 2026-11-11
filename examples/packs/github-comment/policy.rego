@@ -37,7 +37,9 @@ caller_allowed if {
 default route_expected := false
 
 route_expected if {
-	input.provider == "github"
+	input.destination.host == "api.github.com"
+	input.destination.port == 443
+	input.plugin == "github"
 	input.binding == "github-app-repo"
 }
 
@@ -67,7 +69,7 @@ matched_rules contains "repository-read-comment" if allow
 
 reasons contains "caller UID is not allowed" if not caller_allowed
 
-reasons contains "unexpected provider or binding" if not route_expected
+reasons contains "unexpected destination or binding" if not route_expected
 
 reasons contains "schema digest is not the reviewed one" if not schema_reviewed
 

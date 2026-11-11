@@ -1,13 +1,13 @@
 {
-  "version": "pdp.config/v2",
+  "version": "pdp.config/v3",
   "revision": "minimal-v1",
   "transport": {
     "unix_socket": "/run/pdp/pdp.sock",
     "socket_mode": "0660"
   },
-  "routes": [
+  "upstreams": [
     {
-      "provider": "github",
+      "host": "api.github.com",
       "binding": "github-local"
     }
   ],

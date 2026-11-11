@@ -1,11 +1,13 @@
 {
-  "version": "pdp.authz/v1",
+  "version": "pdp.authz/v2",
   "identity": {
     "id": "spiffe://example.org/workers/approved",
     "auth_method": "spiffe",
     "spiffe_id": "spiffe://example.org/workers/approved"
   },
-  "provider": "github",
+  "protocol": "http",
+  "destination": {"scheme": "https", "host": "api.github.com", "port": 443},
+  "plugin": "github",
   "binding": "github-worker",
   "schema_digest": "sha256:e5144f87c069a92de5d96588a6b4b4c8614f1f88c9f52b012a7dd63704a0ca89",
   "http": {

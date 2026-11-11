@@ -1,5 +1,5 @@
 {
-  "version": "pdp.config/v2",
+  "version": "pdp.config/v3",
   "revision": "github-comment-v1",
   "transport": {
     "unix_socket": "/run/pdp/pdp.sock",
@@ -11,9 +11,9 @@
       "file": "github-rest.json"
     }
   },
-  "routes": [
+  "upstreams": [
     {
-      "provider": "github",
+      "host": "api.github.com",
       "binding": "github-app-repo",
       "schema": "github"
     }
