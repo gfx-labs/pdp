@@ -104,8 +104,8 @@ func (e *Engine) Diagnostics() []Diagnostic { return []Diagnostic{} }
 
 func (e *Engine) Evaluate(ctx context.Context, input Input) (Decision, error) {
 	d := Decision{
-		Revision: e.Revision(), Identity: input.Identity, Provider: input.Provider,
-		Binding: input.Binding, SchemaDigest: input.SchemaDigest,
+		Revision: e.Revision(), Identity: input.Identity, Protocol: input.Protocol,
+		Destination: input.Destination, Binding: input.Binding, SchemaDigest: input.SchemaDigest,
 		Reasons: []string{}, MatchedRules: []string{}, Operations: []OperationDecision{},
 	}
 	// Do not retain the caller's UID pointer, including on an invalid input path.
@@ -117,7 +117,8 @@ func (e *Engine) Evaluate(ctx context.Context, input Input) (Decision, error) {
 		d.Reasons = append(d.Reasons, "evaluation canceled")
 		return d, err
 	}
-	if input.Version != InputVersion || input.Identity.ID == "" || input.Provider == "" || input.Binding == "" {
+	d.Destination.Addresses = append([]string(nil), input.Destination.Addresses...)
+	if !validEnvelope(input) {
 		d.Reasons = append(d.Reasons, "invalid trusted input envelope")
 		return d, nil
 	}
@@ -177,6 +178,30 @@ func (e *Engine) Evaluate(ctx context.Context, input Input) (Decision, error) {
 	return d, nil
 }
 
+// validEnvelope checks the shape the gateway promises, not any permission.
+func validEnvelope(input Input) bool {
+	if input.Version != InputVersion || input.Identity.ID == "" || input.Destination.Host == "" || input.Destination.Port < 1 || input.Destination.Port > 65535 {
+		return false
+	}
+	switch input.Protocol {
+	case ProtocolHTTP, ProtocolWebSocket:
+		if input.HTTP == nil || (input.Destination.Scheme != "http" && input.Destination.Scheme != "https") {
+			return false
+		}
+	case ProtocolTunnel:
+		if input.HTTP != nil || input.Destination.Scheme != "tcp" || input.Plugin != "" || input.Binding != "" {
+			return false
+		}
+	default:
+		return false
+	}
+	// A schema-backed request without a digest or operation was not normalized.
+	if (input.Plugin == "") != (input.SchemaDigest == "") {
+		return false
+	}
+	return input.Plugin == "" || len(input.Operations) > 0
+}
+
 // OPA represents both sets and arrays as JSON arrays at the result boundary.
 func stringItems(value map[string]any, key string) ([]string, bool) {
 	items, exists := value[key]
@@ -233,9 +258,6 @@ func operationDetails(input Input) ([]OperationDecision, error) {
 		if !fields[op.ID] {
 			out = append(out, OperationDecision{ID: op.ID, Resources: op.Resources})
 		}
-	}
-	if len(out) == 0 {
-		return nil, errors.New("at least one normalized operation is required")
 	}
 	return out, nil
 }
