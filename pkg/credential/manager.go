@@ -153,6 +153,14 @@ func New(cfg Config) (*Manager, error) {
 		if b.LinearActor != "" && b.LinearActor != "app" && b.LinearActor != "user" {
 			return nil, failure(CodeInvalid)
 		}
+		if b.Placeholder != "" && (len(b.Placeholder) < 8 || !validValue(b.Placeholder, 256) || strings.ContainsAny(b.Placeholder, " ,\"\\")) {
+			return nil, failure(CodeInvalid)
+		}
+		for header, value := range b.Headers {
+			if !ValidHeader(header) || !validValue(value, 1024) {
+				return nil, failure(CodeInvalid)
+			}
+		}
 		if g := b.GitHub; g != nil {
 			if !validValue(g.AppID, 256) || len(g.RepositoryIDs) == 0 || len(g.RepositoryIDs) > 500 || len(g.Permissions) == 0 {
 				return nil, failure(CodeInvalid)
@@ -211,6 +219,9 @@ func cloneConfig(c Config) Config {
 		}
 		v.Secrets = secrets
 		v.Parameters = cloneMap(v.Parameters)
+		if v.Headers != nil {
+			v.Headers = cloneMap(v.Headers)
+		}
 		v.Scopes = append([]string(nil), v.Scopes...)
 		if v.GitHub != nil {
 			g := *v.GitHub
@@ -273,6 +284,21 @@ func (m *Manager) request(r Request) (Request, string, error) {
 func (m *Manager) Validate(r Request) error {
 	_, _, err := m.request(r)
 	return err
+}
+
+// Binding describes the non-secret routing facts of one configured binding.
+type Binding struct {
+	Provider    string
+	Placeholder string
+	Headers     map[string]string
+}
+
+func (m *Manager) Binding(name string) (Binding, bool) {
+	b, ok := m.cfg.Bindings[name]
+	if !ok {
+		return Binding{}, false
+	}
+	return Binding{Provider: b.Provider, Placeholder: b.Placeholder, Headers: cloneMap(b.Headers)}, true
 }
 
 // Get coalesces acquisitions by provider, binding and canonical scope set.

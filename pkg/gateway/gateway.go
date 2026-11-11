@@ -1,4 +1,5 @@
-// Package gateway implements the authenticated, schema-bounded upstream gateway.
+// Package gateway implements the authenticated forward proxy: it identifies the
+// caller, asks policy about the destination, then injects a credential.
 package gateway
 
 import (
@@ -10,47 +11,70 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
-	"strings"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gfx-labs/pdp/pkg/auth"
 	"github.com/gfx-labs/pdp/pkg/credential"
+	"github.com/gfx-labs/pdp/pkg/intercept"
 	"github.com/gfx-labs/pdp/pkg/policy"
 	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
-type Route struct {
-	Provider    string
-	Binding     string
-	UpstreamURL string
-	Scopes      []string
-	REST        *schema.RESTSchema
-	GraphQL     *schema.GraphQLSchema
+// Upstream attaches a credential, schema or TLS mode to one destination. It is
+// not an allowlist: a destination with no entry still goes to policy.
+type Upstream struct {
+	Host string
+	Port int // 0 means 443
+	// Tunnel relays CONNECT bytes without terminating TLS. Policy then sees
+	// only host and port, and no credential can be injected.
+	Tunnel bool
+	// Bindings are the credentials this destination may receive. With several,
+	// the caller's placeholder selects the candidate that policy must allow.
+	Bindings []string
+	Scopes   []string
+	// Plugin names the pinned schema in policy input and audit records.
+	Plugin  string
+	REST    *schema.RESTSchema
+	GraphQL *schema.GraphQLSchema
+	// GraphQLPath is the only path a GraphQL upstream accepts. Default /graphql.
+	GraphQLPath string
+	// TokenPaths are token endpoints answered locally with the placeholder, so
+	// a refresh never returns a real token to the workload.
+	TokenPaths []string
 }
 
 type SnapshotConfig struct {
 	Version       string
 	Authenticator auth.Authenticator
-	Routes        []Route
+	Upstreams     []Upstream
 	Policy        *policy.Engine
 	Credentials   *credential.Manager
 	OnRetire      func()
 }
 
-type route struct {
-	Route
-	upstream *url.URL
+type binding struct {
+	name string
+	credential.Binding
 }
 
-// Snapshot holds one immutable routing, identity, schema, policy and adapter view.
+type upstream struct {
+	Upstream
+	digest     string
+	bindings   []binding
+	tokenPaths map[string]bool
+}
+
+func (u *upstream) strict() bool { return u != nil && (u.REST != nil || u.GraphQL != nil) }
+
+// Snapshot holds one immutable upstream, identity, schema, policy and adapter view.
 // Its dependencies must not be closed while a request using it remains in flight.
 type Snapshot struct {
 	version       string
 	authenticator auth.Authenticator
-	routes        map[string]route
+	upstreams     map[string]*upstream
 	policy        *policy.Engine
 	credentials   *credential.Manager
 	mu            sync.Mutex
@@ -62,50 +86,71 @@ type Snapshot struct {
 }
 
 func NewSnapshot(c SnapshotConfig) (*Snapshot, error) {
-	if !safeLabel(c.Version) || c.Authenticator == nil || c.Policy == nil || c.Credentials == nil || len(c.Routes) == 0 || len(c.Routes) > 2 {
+	if !safeLabel(c.Version) || c.Authenticator == nil || c.Policy == nil || c.Credentials == nil || len(c.Upstreams) > 1024 {
 		return nil, errors.New("invalid gateway snapshot")
 	}
-	s := &Snapshot{version: c.Version, authenticator: c.Authenticator, policy: c.Policy, credentials: c.Credentials, routes: make(map[string]route), done: make(chan struct{}), onRetire: c.OnRetire}
-	for _, r := range c.Routes {
-		if !safeLabel(r.Binding) {
-			return nil, errors.New("invalid route binding")
+	s := &Snapshot{version: c.Version, authenticator: c.Authenticator, policy: c.Policy, credentials: c.Credentials, upstreams: make(map[string]*upstream), done: make(chan struct{}), onRetire: c.OnRetire}
+	for _, u := range c.Upstreams {
+		if u.Port == 0 {
+			u.Port = 443
 		}
-		if _, ok := s.routes[r.Provider]; ok {
-			return nil, errors.New("duplicate provider route")
+		host, ok := normalizeHost(u.Host)
+		if !ok || host != u.Host || u.Port < 1 || u.Port > 65535 {
+			return nil, errors.New("upstream host must be a lower-case name or address with a valid port")
 		}
-		switch r.Provider {
-		case "github":
-			if r.GraphQL != nil {
-				return nil, errors.New("GitHub route cannot use GraphQL schema")
+		entry := &upstream{Upstream: u, tokenPaths: make(map[string]bool)}
+		key := destination{host: u.Host, port: u.Port}.key()
+		if _, exists := s.upstreams[key]; exists {
+			return nil, errors.New("duplicate upstream")
+		}
+		if u.REST != nil && u.GraphQL != nil {
+			return nil, errors.New("upstream cannot pin both a REST and a GraphQL schema")
+		}
+		if u.Tunnel && (len(u.Bindings) != 0 || entry.strict() || len(u.TokenPaths) != 0) {
+			return nil, errors.New("a tunnel upstream cannot have a binding, schema or token path")
+		}
+		if entry.strict() {
+			if !safeLabel(u.Plugin) {
+				return nil, errors.New("a schema-backed upstream needs a plugin name")
 			}
-			if r.UpstreamURL == "" {
-				r.UpstreamURL = "https://api.github.com"
+			if u.REST != nil {
+				entry.digest = u.REST.Digest()
+			} else {
+				entry.digest = u.GraphQL.Digest()
+				if entry.GraphQLPath == "" {
+					entry.GraphQLPath = "/graphql"
+				}
+				if !validPath(entry.GraphQLPath) {
+					return nil, errors.New("invalid GraphQL path")
+				}
 			}
-		case "linear":
-			if r.REST != nil {
-				return nil, errors.New("Linear route cannot use REST schema")
+		} else if u.Plugin != "" || u.GraphQLPath != "" {
+			return nil, errors.New("plugin and GraphQL path require a schema")
+		}
+		entry.Scopes = append([]string(nil), u.Scopes...)
+		placeholders := map[string]bool{}
+		for _, name := range u.Bindings {
+			b, ok := c.Credentials.Binding(name)
+			if !ok || !safeLabel(name) || c.Credentials.Validate(credential.Request{Provider: b.Provider, Binding: name, Scopes: entry.Scopes}) != nil {
+				return nil, errors.New("invalid upstream credential binding")
 			}
-			if r.UpstreamURL == "" {
-				r.UpstreamURL = "https://api.linear.app/graphql"
+			// Without distinct placeholders nothing could tell the accounts apart.
+			if (len(u.Bindings) > 1 || len(u.TokenPaths) > 0) && (b.Placeholder == "" || placeholders[b.Placeholder]) {
+				return nil, errors.New("each binding of this upstream needs its own placeholder")
 			}
-		default:
-			return nil, errors.New("unsupported provider route")
+			placeholders[b.Placeholder] = true
+			entry.bindings = append(entry.bindings, binding{name: name, Binding: b})
 		}
-		u, err := url.Parse(r.UpstreamURL)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" || u.Opaque != "" || strings.ContainsAny(r.UpstreamURL, "\\\r\n\t") {
-			return nil, errors.New("upstream must be a fixed HTTPS endpoint")
+		if len(u.TokenPaths) > 0 && (len(u.Bindings) == 0 || entry.strict()) {
+			return nil, errors.New("token paths require a binding and no schema")
 		}
-		if r.Provider == "github" && u.Path != "" && u.Path != "/" {
-			return nil, errors.New("GitHub upstream must be an origin")
+		for _, path := range u.TokenPaths {
+			if !validPath(path) {
+				return nil, errors.New("invalid token path")
+			}
+			entry.tokenPaths[path] = true
 		}
-		if r.Provider == "linear" && u.Path != "/graphql" {
-			return nil, errors.New("Linear upstream must use /graphql")
-		}
-		r.Scopes = append([]string(nil), r.Scopes...)
-		if err := c.Credentials.Validate(credential.Request{Provider: r.Provider, Binding: r.Binding, Scopes: r.Scopes}); err != nil {
-			return nil, errors.New("invalid route credential binding")
-		}
-		s.routes[r.Provider] = route{Route: r, upstream: u}
+		s.upstreams[key] = entry
 	}
 	return s, nil
 }
@@ -158,13 +203,26 @@ func (s *Snapshot) WaitDrained(ctx context.Context) error {
 }
 
 type Options struct {
+	// MaxRequestBytes and MaxResponseBytes bound schema-backed exchanges, which
+	// are buffered. Other exchanges are relayed and bounded by StreamTimeout.
 	MaxRequestBytes  int64
 	MaxResponseBytes int64
 	MaxHeaderBytes   int
 	MaxConcurrent    int
-	RequestTimeout   time.Duration
+	// RequestTimeout bounds a schema-backed exchange and the wait for any
+	// upstream's response headers.
+	RequestTimeout time.Duration
+	// StreamTimeout bounds a relayed response, WebSocket or tunnel.
+	StreamTimeout time.Duration
 	// RootCAs supplies explicit trust for private HTTPS upstreams. Nil uses system roots.
 	RootCAs *x509.CertPool
+	// Interception signs leaf certificates for CONNECT and transparent TLS.
+	// Without it only tunnel upstreams and absolute-form requests are served.
+	Interception *intercept.Authority
+	// Lookup resolves a destination host. Nil uses the system resolver.
+	Lookup func(ctx context.Context, host string) ([]netip.Addr, error)
+	// DialContext connects to one resolved address. Nil uses a plain TCP dialer.
+	DialContext func(ctx context.Context, network, address string) (net.Conn, error)
 	// Audit receives identifiers and fixed outcome codes only, never request values.
 	Audit func(AuditEvent)
 }
@@ -173,7 +231,11 @@ type AuditEvent struct {
 	Time           time.Time `json:"time"`
 	Snapshot       string    `json:"snapshot"`
 	Principal      string    `json:"principal,omitempty"`
-	Provider       string    `json:"provider,omitempty"`
+	Protocol       string    `json:"protocol,omitempty"`
+	Host           string    `json:"host,omitempty"`
+	Port           int       `json:"port,omitempty"`
+	Binding        string    `json:"binding,omitempty"`
+	Plugin         string    `json:"plugin,omitempty"`
 	Operation      string    `json:"operation,omitempty"`
 	PolicyRevision string    `json:"policy_revision,omitempty"`
 	SchemaDigest   string    `json:"schema_digest,omitempty"`
@@ -181,6 +243,8 @@ type AuditEvent struct {
 	Operations     []string  `json:"operations,omitempty"`
 	Outcome        string    `json:"outcome"`
 	Status         int       `json:"status"`
+	BytesSent      int64     `json:"bytes_sent,omitempty"`
+	BytesReceived  int64     `json:"bytes_received,omitempty"`
 	DurationMS     int64     `json:"duration_ms"`
 }
 
@@ -199,13 +263,17 @@ type Gateway struct {
 	closed    bool
 	opts      Options
 	sem       chan struct{}
+	conns     chan struct{}
 	transport *http.Transport
+	roots     *x509.CertPool
 	requests  atomic.Uint64
 	allowed   atomic.Uint64
 	denied    atomic.Uint64
 	failed    atomic.Uint64
 	inflight  atomic.Int64
 }
+
+type pinKey struct{}
 
 func New(s *Snapshot, o Options) (*Gateway, error) {
 	if s == nil {
@@ -226,18 +294,28 @@ func New(s *Snapshot, o Options) (*Gateway, error) {
 	if o.RequestTimeout == 0 {
 		o.RequestTimeout = 15 * time.Second
 	}
-	if o.MaxRequestBytes < 1 || o.MaxRequestBytes > schema.MaxBodyBytes || o.MaxResponseBytes < 1 || o.MaxResponseBytes > schema.MaxDocumentBytes || o.MaxHeaderBytes < 1024 || o.MaxHeaderBytes > 64<<10 || o.MaxConcurrent < 1 || o.MaxConcurrent > 1024 || o.RequestTimeout < time.Millisecond || o.RequestTimeout > time.Minute {
+	if o.StreamTimeout == 0 {
+		o.StreamTimeout = 10 * time.Minute
+	}
+	if o.MaxRequestBytes < 1 || o.MaxRequestBytes > schema.MaxBodyBytes || o.MaxResponseBytes < 1 || o.MaxResponseBytes > schema.MaxDocumentBytes || o.MaxHeaderBytes < 1024 || o.MaxHeaderBytes > 64<<10 || o.MaxConcurrent < 1 || o.MaxConcurrent > 1024 || o.RequestTimeout < time.Millisecond || o.RequestTimeout > time.Minute || o.StreamTimeout < o.RequestTimeout || o.StreamTimeout > 24*time.Hour {
 		return nil, errors.New("invalid gateway limits")
 	}
-	roots := o.RootCAs
-	if roots != nil {
-		roots = roots.Clone()
+	if o.Lookup == nil {
+		o.Lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		}
 	}
-	g := &Gateway{opts: o, sem: make(chan struct{}, o.MaxConcurrent)}
+	if o.DialContext == nil {
+		o.DialContext = (&net.Dialer{Timeout: o.RequestTimeout}).DialContext
+	}
+	g := &Gateway{opts: o, sem: make(chan struct{}, o.MaxConcurrent), conns: make(chan struct{}, 2*o.MaxConcurrent)}
+	if o.RootCAs != nil {
+		g.roots = o.RootCAs.Clone()
+	}
 	// A fresh HTTP/1 connection per request prevents Transport's reused-connection retries.
 	g.transport = &http.Transport{
-		Proxy: nil, DialContext: (&net.Dialer{Timeout: o.RequestTimeout}).DialContext,
-		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, NextProtos: []string{"http/1.1"}},
+		Proxy: nil, DialContext: g.dialPinned,
+		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: g.roots, NextProtos: []string{"http/1.1"}},
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
 		TLSHandshakeTimeout: o.RequestTimeout, ResponseHeaderTimeout: o.RequestTimeout,
 		MaxResponseHeaderBytes: int64(o.MaxHeaderBytes), DisableCompression: true,
@@ -247,8 +325,41 @@ func New(s *Snapshot, o Options) (*Gateway, error) {
 	return g, nil
 }
 
+// dialPinned connects only to the addresses policy was shown. A second DNS
+// answer cannot move an allowed request to another host.
+func (g *Gateway) dialPinned(ctx context.Context, network, address string) (net.Conn, error) {
+	addresses, ok := ctx.Value(pinKey{}).([]netip.Addr)
+	_, port, err := net.SplitHostPort(address)
+	if !ok || len(addresses) == 0 || err != nil {
+		return nil, errors.New("destination is not pinned")
+	}
+	for _, candidate := range addresses {
+		var conn net.Conn
+		if conn, err = g.opts.DialContext(ctx, "tcp", net.JoinHostPort(candidate.String(), port)); err == nil {
+			return conn, nil
+		}
+	}
+	return nil, err
+}
+
+func (g *Gateway) lookup(ctx context.Context, host string) ([]netip.Addr, error) {
+	found, err := g.opts.Lookup(ctx, host)
+	if err != nil || len(found) == 0 {
+		return nil, errors.New("destination did not resolve")
+	}
+	if len(found) > 16 {
+		found = found[:16]
+	}
+	out := make([]netip.Addr, len(found))
+	for i, a := range found {
+		out[i] = a.Unmap()
+	}
+	return out, nil
+}
+
 // Reload publishes one complete view. In-flight requests retain their old view.
 // Revocation applies when a request loads the pointer, not midway through a write.
+// A relayed stream or tunnel keeps its old view until it ends or StreamTimeout.
 func (g *Gateway) Reload(s *Snapshot) error {
 	if s == nil {
 		return errors.New("gateway snapshot is required")
@@ -287,12 +398,13 @@ func (g *Gateway) Close() {
 	g.transport.CloseIdleConnections()
 }
 
-func NewHTTPServer(addr string, g *Gateway) *http.Server {
+func (g *Gateway) newServer(addr string, connContext func(context.Context, net.Conn) context.Context) *http.Server {
 	connections := make(chan struct{}, 2*g.opts.MaxConcurrent)
 	var accepted sync.Map
-	return &http.Server{Addr: addr, Handler: g, ConnContext: auth.ConnContext,
-		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: g.opts.RequestTimeout,
-		WriteTimeout: g.opts.RequestTimeout + time.Second, IdleTimeout: 30 * time.Second,
+	// Read and write deadlines are set per request, because a relayed stream
+	// outlives the bound that applies to a buffered exchange.
+	return &http.Server{Addr: addr, Handler: g, ConnContext: connContext,
+		ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
 		MaxHeaderBytes: g.opts.MaxHeaderBytes, ErrorLog: log.New(io.Discard, "", 0),
 		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 		ConnState: func(c net.Conn, state http.ConnState) {
@@ -311,6 +423,31 @@ func NewHTTPServer(addr string, g *Gateway) *http.Server {
 			}
 		},
 	}
+}
+
+// NewHTTPServer serves callers that address the proxy explicitly, over the
+// Unix socket or the SPIFFE listener.
+func NewHTTPServer(addr string, g *Gateway) *http.Server { return g.newServer(addr, auth.ConnContext) }
+
+// NewTransparentServer serves DNS-steered callers, whose only identity is
+// their source address.
+func NewTransparentServer(addr string, g *Gateway) *http.Server {
+	return g.newServer(addr, auth.TransparentConnContext)
+}
+
+// TransparentTLSConfig terminates TLS for whatever name a steered client asked
+// for. Policy still decides whether the request to that name goes anywhere.
+func (g *Gateway) TransparentTLSConfig() (*tls.Config, error) {
+	if g.opts.Interception == nil {
+		return nil, errors.New("transparent TLS requires an interception CA")
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}, GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		host, ok := normalizeHost(hello.ServerName)
+		if !ok {
+			return nil, errors.New("server name is required")
+		}
+		return g.opts.Interception.Certificate(host)
+	}}, nil
 }
 
 func safeLabel(s string) bool {
@@ -332,150 +469,174 @@ func auditLabel(s string) string {
 	return ""
 }
 
-func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// Outcomes that mean the caller got what it asked for.
+var served = map[string]bool{"forwarded": true, "upgraded": true, "tunneled": true, "intercepting": true, "token_answered": true}
+
+// exchange is the state of one request while it is authorized and relayed.
+type exchange struct {
+	g        *Gateway
+	s        *Snapshot
+	w        http.ResponseWriter
+	r        *http.Request
+	started  time.Time
+	event    AuditEvent
+	status   int
+	outcome  string
+	hijacked bool
+}
+
+func (x *exchange) fail(code int, reason string) {
+	x.status, x.outcome = code, reason
+	if !x.hijacked {
+		writeError(x.w, code, reason)
+	}
+}
+
+func (x *exchange) finish() {
+	x.event.Status, x.event.Outcome = x.status, x.outcome
+	x.event.DurationMS = time.Since(x.started).Milliseconds()
+	switch {
+	case x.status >= 500:
+		x.g.failed.Add(1)
+	case served[x.outcome]:
+		x.g.allowed.Add(1)
+	default:
+		x.g.denied.Add(1)
+	}
+	if x.g.opts.Audit != nil {
+		x.g.opts.Audit(x.event)
+	}
+}
+
+// admit takes a concurrency slot. The returned release must be called.
+func (x *exchange) admit() (release func(), ok bool) {
+	select {
+	case x.g.sem <- struct{}{}:
+	default:
+		x.fail(http.StatusServiceUnavailable, "concurrency_limited")
+		return nil, false
+	}
+	x.g.inflight.Add(1)
+	return func() { <-x.g.sem; x.g.inflight.Add(-1) }, true
+}
+
+// authorize asks policy about the destination, resolves it, then asks again
+// with the addresses that will be dialed. A denied name is never looked up, so
+// a caller cannot use lookups of refused names to send data out through DNS.
+// With resolve false nothing will be dialed, so one decision is enough.
+func (x *exchange) authorize(ctx context.Context, input *policy.Input, resolve bool) ([]netip.Addr, bool) {
+	x.event.Protocol, x.event.Host, x.event.Port = input.Protocol, auditLabel(input.Destination.Host), input.Destination.Port
+	x.event.Binding, x.event.Plugin, x.event.SchemaDigest = auditLabel(input.Binding), auditLabel(input.Plugin), input.SchemaDigest
+	for _, op := range input.Operations {
+		if safeLabel(op.ID) {
+			x.event.Operations = append(x.event.Operations, op.ID)
+		}
+	}
+	if len(x.event.Operations) == 1 && len(input.Operations) == 1 {
+		x.event.Operation = x.event.Operations[0]
+	}
+	decide := func() bool {
+		decision, err := x.s.policy.Evaluate(ctx, *input)
+		x.event.MatchedRules = nil
+		for _, rule := range decision.MatchedRules {
+			if safeLabel(rule) {
+				x.event.MatchedRules = append(x.event.MatchedRules, rule)
+			}
+		}
+		if err != nil || !decision.Allow {
+			x.fail(http.StatusForbidden, "forbidden")
+			return false
+		}
+		return true
+	}
+	var addresses []netip.Addr
+	if !resolve {
+		return nil, decide()
+	}
+	if literal, err := netip.ParseAddr(input.Destination.Host); err == nil {
+		addresses = []netip.Addr{literal}
+	} else {
+		if !decide() {
+			return nil, false
+		}
+		if addresses, err = x.g.lookup(ctx, input.Destination.Host); err != nil {
+			x.fail(http.StatusBadGateway, "destination_unresolved")
+			return nil, false
+		}
+	}
+	for _, address := range addresses {
+		input.Destination.Addresses = append(input.Destination.Addresses, address.String())
+	}
+	if !decide() {
+		return nil, false
+	}
+	return addresses, true
+}
+
+func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) { g.serve(w, r, r, nil) }
+
+// serve handles one request. outer is the request that carries the verified
+// connection. fixed is set for a request read inside an intercepted CONNECT.
+func (g *Gateway) serve(w http.ResponseWriter, r, outer *http.Request, fixed *destination) {
+	if after := g.exchange(w, r, outer, fixed); after != nil {
+		after()
+	}
+}
+
+func (g *Gateway) exchange(w http.ResponseWriter, r, outer *http.Request, fixed *destination) (after func()) {
 	started := time.Now()
 	var s *Snapshot
 	for {
 		s = g.current.Load()
 		if s == nil {
 			writeError(w, http.StatusServiceUnavailable, "gateway_closed")
-			return
+			return nil
 		}
 		if s.acquire() {
 			break
 		}
 	}
 	defer s.release()
-	event := AuditEvent{Time: started.UTC(), Snapshot: s.version, PolicyRevision: auditLabel(s.policy.Revision())}
-	status := http.StatusInternalServerError
-	outcome := "internal_error"
+	x := &exchange{g: g, s: s, w: w, r: r, started: started, status: http.StatusInternalServerError, outcome: "internal_error"}
+	x.event = AuditEvent{Time: started.UTC(), Snapshot: s.version, PolicyRevision: auditLabel(s.policy.Revision())}
 	g.requests.Add(1)
-	defer func() {
-		event.Status = status
-		event.Outcome = outcome
-		event.DurationMS = time.Since(started).Milliseconds()
-		if status >= 500 {
-			g.failed.Add(1)
-		} else if outcome != "forwarded" {
-			g.denied.Add(1)
-		}
-		if g.opts.Audit != nil {
-			g.opts.Audit(event)
-		}
-	}()
-	fail := func(code int, reason string) { status = code; outcome = reason; writeError(w, code, reason) }
-	identity, err := s.authenticator.Authenticate(r)
-	if err != nil || !safeLabel(identity.ID()) {
-		fail(http.StatusUnauthorized, "unauthenticated")
-		return
-	}
-	event.Principal = identity.ID()
-	provider, path, ok := selectRoute(r.URL.Path)
-	if !ok {
-		fail(http.StatusNotFound, "route_not_found")
-		return
-	}
-	route, ok := s.routes[provider]
-	if !ok {
-		fail(http.StatusNotFound, "route_not_found")
-		return
-	}
-	event.Provider = provider
-	select {
-	case g.sem <- struct{}{}:
-	default:
-		fail(http.StatusServiceUnavailable, "concurrency_limited")
-		return
-	}
-	g.inflight.Add(1)
-	defer func() { <-g.sem; g.inflight.Add(-1) }()
-	ctx, cancel := context.WithTimeout(r.Context(), g.opts.RequestTimeout)
-	defer cancel()
-	deadline := started.Add(g.opts.RequestTimeout)
+	defer x.finish()
 	controller := http.NewResponseController(w)
-	_ = controller.SetReadDeadline(deadline)
-	_ = controller.SetWriteDeadline(deadline.Add(time.Second))
-	if err := validateRequest(r, g.opts); err != nil {
-		fail(http.StatusBadRequest, "invalid_request")
-		return
+	_ = controller.SetReadDeadline(started.Add(g.opts.RequestTimeout))
+	_ = controller.SetWriteDeadline(started.Add(g.opts.RequestTimeout + time.Second))
+	// The connection is authenticated again for every request, so a revoked
+	// SPIFFE bundle also stops requests inside an already open CONNECT.
+	identity, err := s.authenticator.Authenticate(outer)
+	if err != nil || !safeLabel(identity.ID()) {
+		x.fail(http.StatusUnauthorized, "unauthenticated")
+		return nil
 	}
-	normalized, body, query, err := normalize(r.WithContext(ctx), path, route, g.opts.MaxRequestBytes)
-	if err != nil {
-		fail(http.StatusBadRequest, "invalid_request")
-		return
-	}
-	input := policyInput(identity, route, normalized, path, query)
-	event.SchemaDigest = input.SchemaDigest
-	for _, op := range input.Operations {
-		if safeLabel(op.ID) {
-			event.Operations = append(event.Operations, op.ID)
+	x.event.Principal = identity.ID()
+	if r.Method == http.MethodConnect {
+		if fixed != nil {
+			x.fail(http.StatusBadRequest, "invalid_request")
+			return nil
 		}
+		return x.connect(identity, outer)
 	}
-	if len(input.Operations) == 1 && safeLabel(input.Operations[0].ID) {
-		event.Operation = input.Operations[0].ID
-	}
-	decision, err := s.policy.Evaluate(ctx, input)
-	for _, rule := range decision.MatchedRules {
-		if safeLabel(rule) {
-			event.MatchedRules = append(event.MatchedRules, rule)
+	dest, ok := requestDestination(r)
+	if fixed != nil {
+		// Inside a CONNECT the destination is the tunnel's, whatever Host says.
+		named, namedOK := splitDestination(fixed.scheme, r.Host)
+		if r.URL.IsAbs() {
+			namedOK = ok && dest == named
 		}
+		dest, ok = *fixed, namedOK && named == *fixed
 	}
-	if err != nil || !decision.Allow {
-		fail(http.StatusForbidden, "forbidden")
-		return
+	if !ok {
+		x.fail(http.StatusBadRequest, "invalid_request")
+		return nil
 	}
-	leaseRequest := credential.Request{Provider: provider, Binding: route.Binding, Scopes: route.Scopes}
-	lease, err := s.credentials.Get(ctx, leaseRequest)
-	if err != nil {
-		fail(http.StatusBadGateway, "credential_unavailable")
-		return
+	release, ok := x.admit()
+	if !ok {
+		return nil
 	}
-	target := *route.upstream
-	if provider == "github" {
-		target.Path = path
-		target.RawPath = ""
-		target.RawQuery = query.Encode()
-	}
-	upstream, err := newUpstreamRequest(ctx, r, &target, body, provider)
-	if err != nil {
-		fail(http.StatusBadRequest, "invalid_request")
-		return
-	}
-	if err = lease.Apply(upstream.Header); err != nil {
-		fail(http.StatusBadGateway, "credential_unavailable")
-		return
-	}
-	// No Client is used: RoundTrip performs exactly one request and cannot follow redirects.
-	response, err := g.transport.RoundTrip(upstream)
-	if err != nil {
-		fail(http.StatusBadGateway, "upstream_unavailable")
-		return
-	}
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		s.credentials.Invalidate(leaseRequest)
-	}
-	data, err := readResponse(response, g.opts)
-	if err != nil {
-		fail(http.StatusBadGateway, "invalid_upstream_response")
-		return
-	}
-	if lease.ContainsSecret(data) {
-		fail(http.StatusBadGateway, "invalid_upstream_response")
-		return
-	}
-	// Go's transport removes Connection: close before exposing response headers,
-	// so reconstruct locally rather than retain hidden connection-nominated fields.
-	if len(data) > 0 {
-		w.Header().Set("Content-Type", "application/json")
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	status = response.StatusCode
-	outcome = "forwarded"
-	g.allowed.Add(1)
-	w.WriteHeader(status)
-	if r.Method != "HEAD" {
-		_, _ = w.Write(data)
-	}
+	defer release()
+	x.request(identity, dest)
+	return nil
 }

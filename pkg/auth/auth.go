@@ -18,12 +18,17 @@ type Identity struct {
 	Method   string
 	UID      uint32
 	SPIFFEID string
+	IP       string
 }
 
-// ID is the SPIFFE ID, or "uid:<n>" for a Unix peer.
+// ID is the SPIFFE ID, "uid:<n>" for a Unix peer or "ip:<address>" for a
+// transparently steered connection.
 func (i Identity) ID() string {
-	if i.Method == "spiffe" {
+	switch i.Method {
+	case "spiffe":
 		return i.SPIFFEID
+	case "transparent":
+		return "ip:" + i.IP
 	}
 	return "uid:" + strconv.FormatUint(uint64(i.UID), 10)
 }

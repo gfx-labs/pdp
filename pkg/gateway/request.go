@@ -2,41 +2,190 @@ package gateway
 
 import (
 	"bytes"
-	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/gfx-labs/pdp/pkg/auth"
 	"github.com/gfx-labs/pdp/pkg/policy"
 	"github.com/gfx-labs/pdp/pkg/schema"
-	"github.com/vektah/gqlparser/v2/ast"
-	"github.com/vektah/gqlparser/v2/parser"
 )
 
 var errRequest = errors.New("invalid request")
 
-func selectRoute(path string) (string, string, bool) {
-	if strings.HasPrefix(path, "/upstreams/github/") {
-		return "github", strings.TrimPrefix(path, "/upstreams/github"), true
-	}
-	if path == "/upstreams/linear/graphql" {
-		return "linear", "/graphql", true
-	}
-	return "", "", false
+// destination is where a request will be sent. It never comes from the address
+// a client connected to, only from the request line, Host, SNI or CONNECT target.
+type destination struct {
+	scheme string
+	host   string
+	port   int
 }
 
-func validateRequest(r *http.Request, o Options) error {
-	if r.URL == nil || r.URL.IsAbs() || r.URL.Host != "" || r.URL.User != nil || r.URL.Opaque != "" || r.URL.Fragment != "" || r.URL.ForceQuery || r.ProtoMajor != 1 || r.ProtoMinor != 1 || r.RequestURI == "*" {
+func defaultPort(scheme string) int {
+	if scheme == "http" {
+		return 80
+	}
+	return 443
+}
+
+func (d destination) key() string { return net.JoinHostPort(d.host, strconv.Itoa(d.port)) }
+
+// authority is the Host value the destination expects.
+func (d destination) authority() string {
+	if d.port == defaultPort(d.scheme) {
+		if strings.Contains(d.host, ":") {
+			return "[" + d.host + "]"
+		}
+		return d.host
+	}
+	return d.key()
+}
+
+// normalizeHost lower-cases a host and removes a trailing dot, so one policy
+// pattern cannot be bypassed by another spelling of the same name.
+func normalizeHost(host string) (string, bool) {
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if addr.Zone() != "" {
+			return "", false
+		}
+		return addr.Unmap().String(), true
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "" || len(host) > 253 {
+		return "", false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return "", false
+		}
+		for _, c := range label {
+			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+				return "", false
+			}
+		}
+	}
+	return host, true
+}
+
+func splitDestination(scheme, hostport string) (destination, bool) {
+	host, rawPort := hostport, ""
+	if h, p, err := net.SplitHostPort(hostport); err == nil {
+		host, rawPort = h, p
+	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	host, ok := normalizeHost(host)
+	if !ok {
+		return destination{}, false
+	}
+	port := defaultPort(scheme)
+	if rawPort != "" {
+		n, err := strconv.Atoi(rawPort)
+		if err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != rawPort {
+			return destination{}, false
+		}
+		port = n
+	} else if scheme == "tcp" {
+		return destination{}, false
+	}
+	return destination{scheme: scheme, host: host, port: port}, true
+}
+
+// requestDestination reads the destination of a non-CONNECT request: the
+// absolute URL of a proxy request, or Host on a transparent listener.
+func requestDestination(r *http.Request) (destination, bool) {
+	if r.URL == nil || r.URL.User != nil || r.URL.Opaque != "" {
+		return destination{}, false
+	}
+	if r.URL.IsAbs() {
+		if r.URL.Scheme != "http" && r.URL.Scheme != "https" {
+			return destination{}, false
+		}
+		return splitDestination(r.URL.Scheme, r.URL.Host)
+	}
+	if !auth.IsTransparent(r.Context()) {
+		return destination{}, false
+	}
+	if r.TLS == nil {
+		return splitDestination("http", r.Host)
+	}
+	// The certificate was minted for the SNI name, so Host must agree with it.
+	d, ok := splitDestination("https", r.Host)
+	sni, sniOK := normalizeHost(r.TLS.ServerName)
+	if !ok || !sniOK || sni != d.host {
+		return destination{}, false
+	}
+	return d, true
+}
+
+func isWebSocket(r *http.Request) bool {
+	return headerHasToken(r.Header, "Connection", "upgrade") && strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+func headerHasToken(h http.Header, name, token string) bool {
+	for _, v := range h.Values(name) {
+		for _, part := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// validateGeneric bounds a request to a destination with no pinned schema.
+// Policy sees the escaped path, so dot segments in either form are refused.
+func validateGeneric(r *http.Request, o Options) error {
+	if r.ProtoMajor != 1 || r.ProtoMinor != 1 || r.RequestURI == "*" || r.URL.Fragment != "" || len(r.Header) > 128 || len(r.Trailer) != 0 {
 		return errRequest
 	}
-	if r.RequestURI != "" && (!strings.HasPrefix(r.RequestURI, "/") || strings.HasPrefix(r.RequestURI, "//")) {
+	if r.Method == "" || r.Method == http.MethodConnect || r.Method != strings.ToUpper(r.Method) {
+		return errRequest
+	}
+	path := r.URL.Path
+	if !strings.HasPrefix(path, "/") || strings.Contains(path, "\\") || !utf8.ValidString(path) {
+		return errRequest
+	}
+	for _, form := range []string{path, r.URL.EscapedPath()} {
+		for _, part := range strings.Split(form, "/") {
+			if part == "." || part == ".." {
+				return errRequest
+			}
+		}
+	}
+	headerBytes := len(r.Host) + len(r.URL.RequestURI())
+	for name, values := range r.Header {
+		headerBytes += len(name) + 4
+		for _, v := range values {
+			headerBytes += len(v) + 2
+			if strings.ContainsAny(v, "\x00\r\n") {
+				return errRequest
+			}
+		}
+	}
+	if headerBytes > o.MaxHeaderBytes {
+		return errRequest
+	}
+	if r.Header.Get("Upgrade") != "" && !isWebSocket(r) {
+		return errRequest
+	}
+	return nil
+}
+
+// validateStrict applies to schema-backed upstreams, where every ambiguity in
+// path, query, encoding or framing is refused instead of forwarded.
+func validateStrict(r *http.Request, o Options) error {
+	if r.URL.Fragment != "" || r.URL.ForceQuery || r.ProtoMajor != 1 || r.ProtoMinor != 1 || r.RequestURI == "*" {
 		return errRequest
 	}
 	switch r.Method {
@@ -73,12 +222,8 @@ func validateRequest(r *http.Request, o Options) error {
 			return errRequest
 		}
 	}
-	for _, v := range r.Header.Values("Connection") {
-		for _, token := range strings.Split(v, ",") {
-			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
-				return errRequest
-			}
-		}
+	if headerHasToken(r.Header, "Connection", "upgrade") {
+		return errRequest
 	}
 	if r.ContentLength > 0 && (r.Method == "GET" || r.Method == "HEAD") {
 		return errRequest
@@ -135,7 +280,9 @@ func validPath(path string) bool {
 	return true
 }
 
-func normalize(r *http.Request, path string, route route, max int64) (*schema.Request, []byte, url.Values, error) {
+// normalize validates a request against the upstream's pinned schema and
+// returns the canonical body and query that will be forwarded.
+func normalize(r *http.Request, up *upstream, max int64) (*schema.Request, []byte, url.Values, error) {
 	var body []byte
 	var err error
 	if r.Body != nil {
@@ -154,30 +301,15 @@ func normalize(r *http.Request, path string, route route, max int64) (*schema.Re
 	if err != nil {
 		return nil, nil, nil, errRequest
 	}
-	copy := r.Clone(r.Context())
-	copy.URL.Path = path
-	copy.URL.RawPath = ""
-	copy.URL.RawQuery = query.Encode()
-	copy.RequestURI = copy.URL.RequestURI()
-	copy.Body = io.NopCloser(bytes.NewReader(body))
 	var n *schema.Request
-	if route.Provider == "github" {
-		if route.REST != nil {
-			n, err = route.REST.Normalize(copy)
-			if err != nil {
-				return nil, nil, nil, errRequest
-			}
-		} else {
-			n = &schema.Request{Protocol: "rest", OperationID: "untyped:http:" + r.Method, Method: r.Method}
-			if len(body) > 0 {
-				n.Body, err = schema.DecodeJSON(body)
-				if err != nil {
-					return nil, nil, nil, errRequest
-				}
-				if _, ok := n.Body.(map[string]any); !ok {
-					return nil, nil, nil, errRequest
-				}
-			}
+	if up.REST != nil {
+		copy := r.Clone(r.Context())
+		copy.URL = &url.URL{Path: r.URL.Path, RawQuery: query.Encode()}
+		copy.RequestURI = copy.URL.RequestURI()
+		copy.Body = io.NopCloser(bytes.NewReader(body))
+		n, err = up.REST.Normalize(copy)
+		if err != nil {
+			return nil, nil, nil, errRequest
 		}
 		if len(body) > 0 {
 			body, err = json.Marshal(n.Body)
@@ -217,11 +349,7 @@ func normalize(r *http.Request, path string, route route, max int64) (*schema.Re
 				return nil, nil, nil, errRequest
 			}
 		}
-		if route.GraphQL != nil {
-			n, err = route.GraphQL.Normalize(document, operationName, variables)
-		} else {
-			n, err = normalizeUntypedGraphQL(document, operationName, variables)
-		}
+		n, err = up.GraphQL.Normalize(document, operationName, variables)
 		if err != nil || n.OperationType == "subscription" {
 			return nil, nil, nil, errRequest
 		}
@@ -241,58 +369,22 @@ func normalize(r *http.Request, path string, route route, max int64) (*schema.Re
 	return n, body, query, nil
 }
 
-func normalizeUntypedGraphQL(document, operationName string, variables map[string]any) (*schema.Request, error) {
-	parsed, err := parser.ParseQueryWithTokenLimit(&ast.Source{Input: document}, schema.MaxQueryTokens)
-	if err != nil || len(parsed.Operations) != 1 || len(parsed.Fragments) != 0 {
-		return nil, errRequest
-	}
-	operation := parsed.Operations[0]
-	if operation.Operation == ast.Subscription || len(operation.Directives) != 0 || (operationName != "" && operation.Name != operationName) {
-		return nil, errRequest
-	}
-	fields := 0
-	var walk func(ast.SelectionSet, int) error
-	walk = func(set ast.SelectionSet, depth int) error {
-		if depth > 32 {
-			return errRequest
-		}
-		for _, sel := range set {
-			field, ok := sel.(*ast.Field)
-			if !ok || len(field.Directives) != 0 || strings.HasPrefix(field.Name, "__") {
-				return errRequest
-			}
-			fields++
-			if fields > 256 {
-				return errRequest
-			}
-			if err := walk(field.SelectionSet, depth+1); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := walk(operation.SelectionSet, 0); err != nil {
-		return nil, err
-	}
-	return &schema.Request{Protocol: "graphql", OperationID: "untyped:graphql:" + string(operation.Operation), OperationType: string(operation.Operation), OperationName: operation.Name, Variables: variables}, nil
-}
-
-func policyInput(identity auth.Identity, route route, n *schema.Request, path string, query url.Values) policy.Input {
-	input := policy.Input{Version: policy.InputVersion, Identity: policy.Identity{ID: identity.ID(), AuthMethod: identity.Method, SPIFFEID: identity.SPIFFEID}, Provider: route.Provider, Binding: route.Binding,
-		HTTP:          policy.HTTPInput{Method: n.Method, Path: path, PathParams: map[string]string{}, Query: query, NormalizedQuery: n.Query, Body: n.Body},
-		OperationType: n.OperationType, OperationName: n.OperationName, Variables: n.Variables}
+func policyIdentity(identity auth.Identity) policy.Identity {
+	out := policy.Identity{ID: identity.ID(), AuthMethod: identity.Method, SPIFFEID: identity.SPIFFEID, IP: identity.IP}
 	if identity.Method == "unix" {
 		uid := identity.UID
-		input.Identity.UID = &uid
+		out.UID = &uid
 	}
+	return out
+}
+
+// addSchemaFacts adds what the pinned schema established about the request.
+func addSchemaFacts(input *policy.Input, up *upstream, n *schema.Request, path string, query url.Values) {
+	input.Plugin, input.SchemaDigest = up.Plugin, up.digest
+	input.HTTP = &policy.HTTPInput{Method: n.Method, Path: path, PathParams: map[string]string{}, Query: query, NormalizedQuery: n.Query, Body: n.Body}
+	input.OperationType, input.OperationName, input.Variables = n.OperationType, n.OperationName, n.Variables
 	for k, v := range n.Path {
 		input.HTTP.PathParams[k] = fmt.Sprint(v)
-	}
-	if route.REST != nil {
-		input.SchemaDigest = route.REST.Digest()
-	}
-	if route.GraphQL != nil {
-		input.SchemaDigest = route.GraphQL.Digest()
 	}
 	if len(n.Fields) == 0 {
 		input.Operations = []policy.OperationInput{{ID: n.OperationID}}
@@ -301,61 +393,47 @@ func policyInput(identity auth.Identity, route route, n *schema.Request, path st
 		input.Operations = append(input.Operations, policy.OperationInput{ID: f.Coordinate})
 		input.GraphQL = append(input.GraphQL, policy.FieldOccurrence{Coordinate: f.Coordinate, Path: f.Path, Arguments: f.Arguments})
 	}
-	return input
 }
 
-func newUpstreamRequest(ctx context.Context, in *http.Request, target *url.URL, body []byte, provider string) (*http.Request, error) {
-	out, err := http.NewRequestWithContext(ctx, in.Method, target.String(), bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+// carriesPlaceholder reports whether a request names this binding's placeholder
+// in a header value or, for a token request, in its body.
+func carriesPlaceholder(h http.Header, body []byte, placeholder string) bool {
+	if len(body) > 0 && bytes.Contains(body, []byte(placeholder)) {
+		return true
 	}
-	// Constructing a fresh header set strips all caller auth, cookies and hop headers,
-	// including arbitrary custom authentication header names configured by adapters.
-	out.Header.Set("Accept", "application/json")
-	out.Header.Set("Accept-Encoding", "identity")
-	out.Header.Set("User-Agent", "pdp/1")
-	if len(body) > 0 {
-		out.Header.Set("Content-Type", "application/json")
-	}
-	if provider == "github" {
-		out.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	}
-	out.Close = true
-	out.GetBody = nil
-	return out, nil
-}
-
-func readResponse(r *http.Response, o Options) ([]byte, error) {
-	if r.StatusCode < 200 || r.StatusCode >= 600 || r.StatusCode >= 300 && r.StatusCode < 400 || r.StatusCode == 101 || len(r.Trailer) != 0 || r.Header.Get("Trailer") != "" || r.Header.Get("Upgrade") != "" || r.Header.Get("Content-Encoding") != "" {
-		return nil, errRequest
-	}
-	if len(r.Header.Values("Content-Type")) > 1 {
-		return nil, errRequest
-	}
-	if typ := r.Header.Get("Content-Type"); typ != "" {
-		media, params, err := mime.ParseMediaType(typ)
-		if err != nil || media != "application/json" || len(params) > 1 {
-			return nil, errRequest
-		}
-		for k, v := range params {
-			if k != "charset" || !strings.EqualFold(v, "utf-8") {
-				return nil, errRequest
+	for _, values := range h {
+		for _, v := range values {
+			if v == placeholder || strings.HasSuffix(v, " "+placeholder) {
+				return true
+			}
+			if scheme, encoded, ok := strings.Cut(v, " "); ok && strings.EqualFold(scheme, "Basic") {
+				if decoded, err := base64.StdEncoding.DecodeString(encoded); err == nil {
+					for _, part := range strings.SplitN(string(decoded), ":", 2) {
+						if part == placeholder {
+							return true
+						}
+					}
+				}
 			}
 		}
 	}
-	if r.ContentLength > o.MaxResponseBytes {
-		return nil, errRequest
-	}
-	data, err := io.ReadAll(io.LimitReader(r.Body, o.MaxResponseBytes+1))
-	if err != nil || int64(len(data)) > o.MaxResponseBytes || len(r.Trailer) != 0 {
-		return nil, errRequest
-	}
-	if len(data) > 0 {
-		if _, err := schema.DecodeJSON(data); err != nil {
-			return nil, errRequest
+	return false
+}
+
+// Hop-by-hop headers end at this proxy in both directions (RFC 9110 7.6.1).
+var hopHeaders = []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade", "Expect"}
+
+func removeHopHeaders(h http.Header) {
+	for _, v := range h.Values("Connection") {
+		for _, name := range strings.Split(v, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				h.Del(name)
+			}
 		}
 	}
-	return data, nil
+	for _, name := range hopHeaders {
+		h.Del(name)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, code string) {
