@@ -20,8 +20,8 @@ A pack is a complete, runnable configuration in one directory. Copy it, edit the
 | `pdp.json` | Runtime wiring: socket or SPIFFE listener, route, schema file, credential binding, secret paths. |
 | `adapter.star` | Starlark that obtains the provider credential after the policy allows. |
 | `github-rest.json`, `linear.graphql` | The pinned request schema. Its digest is checked in `policy.rego`. |
-| `requests/` | Request bodies for `pdp request`. |
-| `explain/` | Trusted inputs for `pdp explain`, to check the policy without serving. |
+| `requests/` | Request bodies for `pdp request`, in packs that send one. |
+| `explain/` | Trusted inputs for `pdp explain`, to check the policy without serving. The GitHub packs have them. The Linear and systemd packs do not. |
 
 All paths in `pdp.json` except secrets and the socket are relative to the pack, so the directory can be moved as a unit.
 
