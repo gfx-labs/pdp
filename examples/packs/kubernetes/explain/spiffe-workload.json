@@ -1,0 +1,12 @@
+{
+  "version": "pdp.authz/v2",
+  "identity": {
+    "id": "spiffe://example.org/ns/agents/sa/worker",
+    "auth_method": "spiffe",
+    "spiffe_id": "spiffe://example.org/ns/agents/sa/worker"
+  },
+  "protocol": "http",
+  "destination": {"scheme": "https", "host": "api.example.com", "port": 443},
+  "binding": "example-api",
+  "http": {"method": "POST", "path": "/v1/jobs"}
+}

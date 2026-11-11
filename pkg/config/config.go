@@ -19,7 +19,7 @@ import (
 	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
-const Version = "pdp.config/v2"
+const Version = "pdp.config/v3"
 const MaxConfigBytes = 4 << 20
 const MaxSchemaBytes = 4 << 20
 const MaxPolicyBytes = 4 << 20
@@ -27,15 +27,17 @@ const MaxAdapterBytes = 1 << 20
 
 // Relative paths are resolved against the configuration file, never cwd.
 type Config struct {
-	Version     string            `json:"version"`
-	Revision    string            `json:"revision"`
-	CAFile      string            `json:"ca_file,omitempty"`
-	Limits      Limits            `json:"limits,omitempty"`
-	Transport   Transport         `json:"transport"`
-	Schemas     map[string]Schema `json:"schemas,omitempty"`
-	Routes      []Route           `json:"routes"`
-	Credentials credential.Config `json:"credentials"`
-	Policy      Policy            `json:"policy"`
+	Version      string            `json:"version"`
+	Revision     string            `json:"revision"`
+	CAFile       string            `json:"ca_file,omitempty"`
+	Limits       Limits            `json:"limits,omitempty"`
+	Transport    Transport         `json:"transport"`
+	Interception *Interception     `json:"interception,omitempty"`
+	DNS          *DNS              `json:"dns,omitempty"`
+	Schemas      map[string]Schema `json:"schemas,omitempty"`
+	Upstreams    []Upstream        `json:"upstreams,omitempty"`
+	Credentials  credential.Config `json:"credentials"`
+	Policy       Policy            `json:"policy"`
 }
 
 // Policy names administrator-authored Rego modules and optional OPA data.
@@ -51,12 +53,39 @@ type Limits struct {
 	MaxHeaderBytes   int           `json:"max_header_bytes,omitempty"`
 	MaxConcurrent    int           `json:"max_concurrent,omitempty"`
 	RequestTimeout   time.Duration `json:"request_timeout,omitempty"`
+	StreamTimeout    time.Duration `json:"stream_timeout,omitempty"`
 }
 
 type Transport struct {
-	UnixSocket string  `json:"unix_socket"`
-	SocketMode string  `json:"socket_mode,omitempty"`
-	SPIFFE     *SPIFFE `json:"spiffe,omitempty"`
+	UnixSocket  string       `json:"unix_socket,omitempty"`
+	SocketMode  string       `json:"socket_mode,omitempty"`
+	SPIFFE      *SPIFFE      `json:"spiffe,omitempty"`
+	Transparent *Transparent `json:"transparent,omitempty"`
+}
+
+// Transparent listeners serve DNS-steered callers, identified only by source
+// address. The TLS listener needs the interception CA.
+type Transparent struct {
+	HTTP  string `json:"http,omitempty"`
+	HTTPS string `json:"https,omitempty"`
+}
+
+// Interception names the CA that signs leaf certificates for CONNECT and
+// transparent TLS. CertificateFile holds the CA, then any intermediates below
+// the root that workloads trust.
+type Interception struct {
+	CertificateFile string `json:"certificate_file"`
+	KeyFile         string `json:"key_file"`
+}
+
+// DNS answers with Address for upstream hosts and Intercept patterns only.
+// Unlisted is "forward" (needs Resolver) or "refuse".
+type DNS struct {
+	Listen    string   `json:"listen"`
+	Address   string   `json:"address"`
+	Intercept []string `json:"intercept,omitempty"`
+	Unlisted  string   `json:"unlisted,omitempty"`
+	Resolver  string   `json:"resolver,omitempty"`
 }
 
 type SPIFFE struct {
@@ -69,11 +98,19 @@ type Schema struct {
 	File     string `json:"file"`
 }
 
-type Route struct {
-	Provider    string   `json:"provider"`
-	Binding     string   `json:"binding"`
-	UpstreamURL string   `json:"upstream_url,omitempty"`
+// Upstream attaches a credential, schema or TLS mode to one destination. It
+// does not allow the destination. Only policy does.
+type Upstream struct {
+	Host string `json:"host"`
+	Port int    `json:"port,omitempty"`
+	// TLS is "intercept" (default) or "tunnel".
+	TLS string `json:"tls,omitempty"`
+	// Binding is shorthand for one entry in Bindings.
+	Binding     string   `json:"binding,omitempty"`
+	Bindings    []string `json:"bindings,omitempty"`
 	Schema      string   `json:"schema,omitempty"`
+	GraphQLPath string   `json:"graphql_path,omitempty"`
+	TokenPaths  []string `json:"token_paths,omitempty"`
 	Scopes      []string `json:"scopes,omitempty"`
 }
 
@@ -130,7 +167,7 @@ func decode(data []byte, target any) error {
 	if !ok {
 		return errors.New("configuration must be a JSON object")
 	}
-	for _, path := range [][]string{{"limits", "request_timeout"}, {"credentials", "limits", "timeout"}, {"credentials", "limits", "expiry_margin"}} {
+	for _, path := range [][]string{{"limits", "request_timeout"}, {"limits", "stream_timeout"}, {"credentials", "limits", "timeout"}, {"credentials", "limits", "expiry_margin"}} {
 		if err := normalizeDuration(root, path); err != nil {
 			return err
 		}
@@ -238,6 +275,32 @@ func Load(ctx context.Context, path string) (_ *Loaded, err error) {
 	}
 	base := filepath.Dir(path)
 	c.Transport.UnixSocket = resolve(base, c.Transport.UnixSocket)
+	if c.Interception != nil {
+		if c.Interception.CertificateFile == "" || c.Interception.KeyFile == "" {
+			return nil, errors.New("interception requires certificate_file and key_file")
+		}
+		c.Interception.CertificateFile = resolve(base, c.Interception.CertificateFile)
+		c.Interception.KeyFile = resolve(base, c.Interception.KeyFile)
+	}
+	if t := c.Transport.Transparent; t != nil {
+		if t.HTTP == "" && t.HTTPS == "" {
+			return nil, errors.New("transparent transport needs an http or https address")
+		}
+		if t.HTTPS != "" && c.Interception == nil {
+			return nil, errors.New("transparent https requires interception")
+		}
+	}
+	if d := c.DNS; d != nil {
+		if d.Unlisted == "" {
+			d.Unlisted = "forward"
+		}
+		if d.Listen == "" || (d.Unlisted != "forward" && d.Unlisted != "refuse") || (d.Unlisted == "forward") != (d.Resolver != "") {
+			return nil, errors.New("dns needs listen, and unlisted forward with a resolver or unlisted refuse")
+		}
+		if c.Transport.Transparent == nil {
+			return nil, errors.New("dns steering requires a transparent transport")
+		}
+	}
 	if c.Transport.SocketMode == "" {
 		c.Transport.SocketMode = "0600"
 	}
@@ -312,17 +375,25 @@ func Load(ctx context.Context, path string) (_ *Loaded, err error) {
 			return nil, errors.New("schema protocol must be rest or graphql")
 		}
 	}
-	providers := make(map[string]bool)
-	for _, r := range c.Routes {
-		if providers[r.Provider] {
-			return nil, errors.New("duplicate provider route")
+	for i, u := range c.Upstreams {
+		if u.Binding != "" {
+			if len(u.Bindings) != 0 {
+				return nil, errors.New("upstream takes binding or bindings, not both")
+			}
+			u.Bindings, u.Binding = []string{u.Binding}, ""
 		}
-		providers[r.Provider] = true
-		if r.Schema != "" {
-			if _, ok := l.Catalogs[r.Schema]; !ok {
-				return nil, errors.New("route references an unknown schema")
+		if u.TLS == "" {
+			u.TLS = "intercept"
+		}
+		if u.TLS != "intercept" && u.TLS != "tunnel" {
+			return nil, errors.New("upstream tls must be intercept or tunnel")
+		}
+		if u.Schema != "" {
+			if _, ok := l.Catalogs[u.Schema]; !ok {
+				return nil, errors.New("upstream references an unknown schema")
 			}
 		}
+		c.Upstreams[i] = u
 	}
 	policyConfig, err := loadPolicy(base, c.Revision, c.Policy)
 	if err != nil {

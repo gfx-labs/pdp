@@ -1,0 +1,67 @@
+{
+  "version": "pdp.config/v3",
+  "revision": "subscription-v1",
+  "transport": {
+    "unix_socket": "/run/pdp/pdp.sock",
+    "socket_mode": "0660"
+  },
+  "interception": {
+    "certificate_file": "/etc/pdp/ca/tls.crt",
+    "key_file": "/etc/pdp/ca/tls.key"
+  },
+  "upstreams": [
+    {
+      "host": "api.provider.example",
+      "bindings": ["team-account", "personal-account"],
+      "token_paths": ["/oauth/token"]
+    }
+  ],
+  "credentials": {
+    "providers": {
+      "provider": {
+        "script_file": "adapter.star",
+        "endpoints": {
+          "token": "https://auth.provider.example/oauth/token"
+        }
+      }
+    },
+    "bindings": {
+      "team-account": {
+        "provider": "provider",
+        "placeholder": "pdp-placeholder-team-account",
+        "headers": {
+          "X-Account-Id": "REPLACE_TEAM_ACCOUNT_ID"
+        },
+        "parameters": {
+          "client_id": "REPLACE_CLIENT_ID"
+        },
+        "secrets": {
+          "client_secret": {
+            "file": "/run/secrets/provider-client-secret"
+          }
+        },
+        "state_file": "/var/lib/pdp/team-account/state.json"
+      },
+      "personal-account": {
+        "provider": "provider",
+        "placeholder": "pdp-placeholder-personal-account",
+        "headers": {
+          "X-Account-Id": "REPLACE_PERSONAL_ACCOUNT_ID"
+        },
+        "parameters": {
+          "client_id": "REPLACE_CLIENT_ID"
+        },
+        "secrets": {
+          "client_secret": {
+            "file": "/run/secrets/provider-client-secret"
+          }
+        },
+        "state_file": "/var/lib/pdp/personal-account/state.json"
+      }
+    }
+  },
+  "policy": {
+    "modules": ["policy.rego"],
+    "data": ["grants.json"]
+  }
+}

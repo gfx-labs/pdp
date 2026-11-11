@@ -1,5 +1,5 @@
 {
-  "version": "pdp.config/v2",
+  "version": "pdp.config/v3",
   "revision": "linear-read-v1",
   "transport": {
     "unix_socket": "/run/pdp/pdp.sock",
@@ -11,9 +11,9 @@
       "file": "linear.graphql"
     }
   },
-  "routes": [
+  "upstreams": [
     {
-      "provider": "linear",
+      "host": "api.linear.app",
       "binding": "linear-app",
       "schema": "linear",
       "scopes": ["read"]

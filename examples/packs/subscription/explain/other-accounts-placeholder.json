@@ -1,0 +1,8 @@
+{
+  "version": "pdp.authz/v2",
+  "identity": {"id": "uid:1000", "auth_method": "unix", "uid": 1000},
+  "protocol": "http",
+  "destination": {"scheme": "https", "host": "api.provider.example", "port": 443},
+  "binding": "personal-account",
+  "http": {"method": "POST", "path": "/v1/messages"}
+}

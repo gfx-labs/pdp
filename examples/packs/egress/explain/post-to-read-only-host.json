@@ -1,0 +1,7 @@
+{
+  "version": "pdp.authz/v2",
+  "identity": {"id": "uid:1000", "auth_method": "unix", "uid": 1000},
+  "protocol": "http",
+  "destination": {"scheme": "https", "host": "pypi.org", "port": 443, "addresses": ["151.101.0.223"]},
+  "http": {"method": "POST", "path": "/legacy/"}
+}

@@ -1,0 +1,268 @@
+# Template only. Not applied to any cluster. Supply an approved image digest,
+# the pdp-config ConfigMap (pdp.json, policy.rego, adapter.star) and the
+# pdp-provider-credentials Secret. Needs cert-manager, trust-manager, the SPIFFE
+# CSI driver and a CNI that enforces NetworkPolicy.
+
+# Private root. Workloads trust this, not the interception CA below it.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: pdp-selfsigned
+  namespace: cert-manager
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: pdp-private-root
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: pdp-private-root
+  secretName: pdp-private-root
+  duration: 87600h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: pdp-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: pdp-private-root
+spec:
+  ca:
+    secretName: pdp-private-root
+---
+# Interception CA. Its Secret is mounted only into the PDP pod. nameConstraints
+# limits the names it can sign for, and the client's TLS library enforces that.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: pdp-interception-ca
+  namespace: pdp
+spec:
+  isCA: true
+  commonName: pdp-interception-ca
+  secretName: pdp-interception-ca
+  duration: 720h
+  renewBefore: 240h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: pdp-private-root
+    kind: ClusterIssuer
+  nameConstraints:
+    critical: true
+    permitted:
+      dnsDomains: ["api.example.com", "pypi.org", "files.pythonhosted.org"]
+---
+# Publishes the private root with the public roots to workload namespaces.
+apiVersion: trust.cert-manager.io/v1alpha1
+kind: Bundle
+metadata:
+  name: pdp-trust
+spec:
+  sources:
+    - useDefaultCAs: true
+    - secret:
+        name: pdp-private-root
+        key: tls.crt
+  target:
+    configMap:
+      key: ca-certificates.crt
+    namespaceSelector:
+      matchLabels:
+        pdp.example.org/egress: gateway
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pdp
+  namespace: pdp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pdp
+  namespace: pdp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pdp
+  template:
+    metadata:
+      labels:
+        app: pdp
+    spec:
+      serviceAccountName: pdp
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pdp
+          image: example.invalid/pdp:REPLACE_WITH_APPROVED_DIGEST
+          args: [serve, --config, /etc/pdp/pdp.json]
+          ports:
+            - name: mtls
+              containerPort: 8443
+            - name: http
+              containerPort: 8080
+            - name: https
+              containerPort: 8444
+            - name: dns
+              containerPort: 5353
+              protocol: UDP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: mtls
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pdp
+              readOnly: true
+            - name: interception-ca
+              mountPath: /etc/pdp/ca
+              readOnly: true
+            - name: secrets
+              mountPath: /run/secrets
+              readOnly: true
+            - name: workload-api
+              mountPath: /run/spire/sockets
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: pdp-config
+        - name: interception-ca
+          secret:
+            secretName: pdp-interception-ca
+            defaultMode: 0440
+        - name: secrets
+          secret:
+            secretName: pdp-provider-credentials
+            defaultMode: 0440
+        - name: workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+---
+# clusterIP must equal dns.address in pdp.json. Steered clients connect to it
+# on 80 and 443, and workload dnsConfig names it as the resolver.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pdp
+  namespace: pdp
+spec:
+  clusterIP: 10.96.0.53
+  selector:
+    app: pdp
+  ports:
+    - name: mtls
+      port: 8443
+      targetPort: mtls
+    - name: http
+      port: 80
+      targetPort: http
+    - name: https
+      port: 443
+      targetPort: https
+    - name: dns
+      port: 53
+      targetPort: dns
+      protocol: UDP
+---
+# Workload namespaces may reach PDP and nothing else. Without this a pod can
+# connect to an IP address directly and PDP never sees it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-through-pdp-only
+  namespace: agents
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: pdp
+          podSelector:
+            matchLabels:
+              app: pdp
+      ports:
+        - port: 8443
+          protocol: TCP
+        - port: 8080
+          protocol: TCP
+        - port: 8444
+          protocol: TCP
+        - port: 5353
+          protocol: UDP
+---
+# Only workload namespaces may reach PDP. Source-IP identity is meaningless if
+# other namespaces can connect.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pdp-ingress
+  namespace: pdp
+spec:
+  podSelector:
+    matchLabels:
+      app: pdp
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              pdp.example.org/egress: gateway
+---
+# Example steered workload: resolver and trust bundle only, no proxy settings.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: steered-example
+  namespace: agents
+spec:
+  dnsPolicy: None
+  dnsConfig:
+    nameservers: [10.96.0.53]
+  containers:
+    - name: worker
+      image: example.invalid/worker:REPLACE_WITH_APPROVED_DIGEST
+      env:
+        - name: SSL_CERT_FILE
+          value: /etc/pdp-trust/ca-certificates.crt
+      volumeMounts:
+        - name: trust
+          mountPath: /etc/pdp-trust
+          readOnly: true
+  volumes:
+    - name: trust
+      configMap:
+        name: pdp-trust

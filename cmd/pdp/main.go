@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -14,7 +15,7 @@ import (
 	"time"
 )
 
-const help = `pdp is an identity-aware provider credential gateway.
+const help = `pdp is an identity-aware forward proxy that injects provider credentials.
 
 Commands:
   serve       Serve a validated configuration, SIGHUP reloads it atomically
@@ -22,7 +23,7 @@ Commands:
   explain     Evaluate a trusted policy input offline, without upstream requests
   catalog     Print a schema operation catalog as JSON
   schema diff Compare two schema operation catalogs
-  request     Send an HTTP request over the local Unix gateway socket
+  request     Send an HTTP request to a URL through the local Unix gateway socket
 
 Run pdp COMMAND --help for options.
 `
@@ -65,19 +66,19 @@ func requestCommand(args []string, out, errout io.Writer) error {
 	fs.SetOutput(errout)
 	socket := fs.String("socket", "/run/pdp/pdp.sock", "Unix gateway socket")
 	method := fs.String("method", "GET", "HTTP method")
-	path := fs.String("path", "", "gateway path, for example /upstreams/github/repos/owner/repo")
+	target := fs.String("url", "", "destination URL, for example https://api.github.com/repos/owner/repo")
 	bodyFile := fs.String("body", "", "request body file, or - for stdin")
 	contentType := fs.String("content-type", "application/json", "request content type")
 	timeout := fs.Duration("timeout", 30*time.Second, "request timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 0 || *path == "" || *timeout <= 0 {
-		return errors.New("usage: pdp request --socket PATH --path /upstreams/PROVIDER/PATH [--method GET] [--body FILE]")
+	if fs.NArg() != 0 || *target == "" || *timeout <= 0 {
+		return errors.New("usage: pdp request --socket PATH --url URL [--method GET] [--body FILE]")
 	}
-	u, err := url.ParseRequestURI(*path)
-	if err != nil || !strings.HasPrefix(*path, "/") || strings.HasPrefix(*path, "//") || u.Host != "" || u.Scheme != "" {
-		return errors.New("request path must be a relative gateway path beginning with /")
+	u, err := url.Parse(*target)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+		return errors.New("request URL must be an absolute http or https URL")
 	}
 	var body io.Reader
 	if *bodyFile == "-" {
@@ -91,22 +92,29 @@ func requestCommand(args []string, out, errout io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, *method, "http://pdp"+*path, body)
+	req, err := http.NewRequestWithContext(ctx, *method, u.String(), body)
 	if err != nil {
 		return errors.New("invalid HTTP request")
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", *contentType)
 	}
-	transport := &http.Transport{
-		Proxy: nil,
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", *socket)
-		},
+	// The request line carries the full https URL and the gateway makes the TLS
+	// connection to the destination itself. Go's Transport would send CONNECT
+	// for an https URL, which needs the interception CA, so write it directly.
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", *socket)
+	if err != nil {
+		return errors.New("gateway request failed")
 	}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req)
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	req.Close = true
+	if err = req.WriteProxy(conn); err != nil {
+		return errors.New("gateway request failed")
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
 	if err != nil {
 		return errors.New("gateway request failed")
 	}

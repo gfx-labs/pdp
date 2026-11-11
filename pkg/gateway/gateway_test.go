@@ -3,15 +3,24 @@ package gateway
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,45 +29,64 @@ import (
 
 	"github.com/gfx-labs/pdp/pkg/auth"
 	"github.com/gfx-labs/pdp/pkg/credential"
+	"github.com/gfx-labs/pdp/pkg/intercept"
 	"github.com/gfx-labs/pdp/pkg/policy"
 	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
 const testToken = "pdp-test-provider-secret-7b35ef91"
 
+// httptest's server certificate names this host, so TLS to it verifies.
+const testHost = "example.com"
+
 type harness struct {
 	g        *Gateway
 	snapshot *Snapshot
-	client   *http.Client
 	socket   string
 	roots    *x509.CertPool
-	endpoint string
-	eventsMu sync.Mutex
+	port     int
+	base     string
+	address  string
+	mu       sync.Mutex
 	events   []AuditEvent
+	lookups  []string
 }
 
-func policyFor(t *testing.T, version string, allow bool) *policy.Engine {
-	t.Helper()
-	module := "package pdp.authz\nimport rego.v1\ndefault allow := false\n"
+// testAuth identifies steered connections by address and all others by Unix peer.
+type testAuth struct{}
+
+func (testAuth) Authenticate(r *http.Request) (auth.Identity, error) {
+	if auth.IsTransparent(r.Context()) {
+		return auth.Transparent{}.Authenticate(r)
+	}
+	return auth.NewUnix().Authenticate(r)
+}
+
+func callerRule(allow bool) string {
 	uid := os.Getuid()
 	if !allow {
 		uid++
 	}
-	module += fmt.Sprintf("allow if { input.identity.auth_method == \"unix\"; input.identity.uid == %d; input.provider in {\"github\", \"linear\"}; input.binding == \"installation\" }\nmatched_rules contains \"authenticated-peer\" if allow\n", uid)
-	return engineFor(t, version, module, nil)
+	return fmt.Sprintf("input.identity.auth_method == \"unix\"\n\tinput.identity.uid == %d", uid)
+}
+
+func policyFor(t *testing.T, version string, allow bool) *policy.Engine {
+	t.Helper()
+	return engineFor(t, version, fmt.Sprintf(`package pdp.authz
+import rego.v1
+default allow := false
+allow if {
+	%s
+	input.destination.host == "example.com"
+	input.binding == "installation"
+}
+matched_rules contains "authenticated-peer" if allow
+`, callerRule(allow)), nil)
 }
 
 func engineFor(t *testing.T, version, module string, data map[string]any) *policy.Engine {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "authz.rego")
-	if err := os.WriteFile(path, []byte(module), 0600); err != nil {
-		t.Fatal(err)
-	}
-	source, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine, err := policy.New(context.Background(), policy.Config{Revision: version, Modules: map[string]string{"authz.rego": string(source)}, Data: data})
+	engine, err := policy.New(context.Background(), policy.Config{Revision: version, Modules: map[string]string{"authz.rego": module}, Data: data})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,18 +94,14 @@ func engineFor(t *testing.T, version, module string, data map[string]any) *polic
 }
 
 func managerFor(t *testing.T, token string) *credential.Manager {
-	return managerForProvider(t, token, "github")
-}
-
-func managerForProvider(t *testing.T, token, provider string) *credential.Manager {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(path, []byte(token), 0600); err != nil {
 		t.Fatal(err)
 	}
 	manager, err := credential.New(credential.Config{
-		Providers: map[string]credential.ProviderConfig{provider: {Script: "def acquire(ctx):\n    return static(secret(\"token\"))\n"}},
-		Bindings:  map[string]credential.BindingConfig{"installation": {Provider: provider, Secrets: map[string]credential.SecretSource{"token": {File: path}}}},
+		Providers: map[string]credential.ProviderConfig{"provider": {Script: "def acquire(ctx):\n    return static(secret(\"token\"))\n"}},
+		Bindings:  map[string]credential.BindingConfig{"installation": {Provider: "provider", Secrets: map[string]credential.SecretSource{"token": {File: path}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -89,15 +113,23 @@ func newHarness(t *testing.T, handler http.HandlerFunc, allow bool, options Opti
 	t.Helper()
 	upstream := httptest.NewTLSServer(handler)
 	t.Cleanup(upstream.Close)
-	roots := x509.NewCertPool()
-	roots.AddCert(upstream.Certificate())
+	h := &harness{roots: x509.NewCertPool(), address: upstream.Listener.Addr().String()}
+	h.roots.AddCert(upstream.Certificate())
+	_, port, _ := net.SplitHostPort(h.address)
+	h.port, _ = strconv.Atoi(port)
+	h.base = "https://" + net.JoinHostPort(testHost, port)
 	if options.RootCAs == nil {
-		options.RootCAs = roots
+		options.RootCAs = h.roots
 	}
-	h := &harness{roots: roots, endpoint: upstream.URL}
-	options.Audit = func(event AuditEvent) { h.eventsMu.Lock(); h.events = append(h.events, event); h.eventsMu.Unlock() }
-	authenticator := auth.NewUnix()
-	snapshot, err := NewSnapshot(SnapshotConfig{Version: "v1", Authenticator: authenticator, Policy: policyFor(t, "p1", allow), Credentials: managerFor(t, testToken), Routes: []Route{{Provider: "github", Binding: "installation", UpstreamURL: upstream.URL}}})
+	// Every test name resolves to the local upstream. Looked-up names are recorded.
+	options.Lookup = func(_ context.Context, host string) ([]netip.Addr, error) {
+		h.mu.Lock()
+		h.lookups = append(h.lookups, host)
+		h.mu.Unlock()
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	options.Audit = func(event AuditEvent) { h.mu.Lock(); h.events = append(h.events, event); h.mu.Unlock() }
+	snapshot, err := NewSnapshot(SnapshotConfig{Version: "v1", Authenticator: testAuth{}, Policy: policyFor(t, "p1", allow), Credentials: managerFor(t, testToken), Upstreams: []Upstream{h.upstream()}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,105 +157,202 @@ func newHarness(t *testing.T, handler http.HandlerFunc, allow bool, options Opti
 			t.Error(err)
 		}
 	})
-	transport := &http.Transport{DisableCompression: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", h.socket)
-	}}
-	h.client = &http.Client{Transport: transport, Timeout: 3 * time.Second}
-	t.Cleanup(transport.CloseIdleConnections)
 	return h
 }
 
-func (h *harness) request(t *testing.T, method, path, body string, headers http.Header) (int, http.Header, string) {
+func (h *harness) upstream() Upstream {
+	return Upstream{Host: testHost, Port: h.port, Bindings: []string{"installation"}}
+}
+
+func (h *harness) install(t *testing.T, version string, engine *policy.Engine, credentials *credential.Manager, upstreams ...Upstream) {
 	t.Helper()
-	r, err := http.NewRequest(method, "http://pdp"+path, strings.NewReader(body))
+	s, err := NewSnapshot(SnapshotConfig{Version: version, Authenticator: testAuth{}, Policy: engine, Credentials: credentials, Upstreams: upstreams})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.Header = headers
+	if err = h.g.Reload(s); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (h *harness) audit() []AuditEvent {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]AuditEvent(nil), h.events...)
+}
+
+// do sends one absolute-form request over the Unix socket. A target starting
+// with a slash is a path on the test upstream. It returns what was read even
+// when the gateway cut the response short.
+func (h *harness) do(method, target, body string, headers http.Header) (int, http.Header, string, error) {
+	if strings.HasPrefix(target, "/") {
+		target = h.base + target
+	}
+	r, err := http.NewRequest(method, target, strings.NewReader(body))
+	if err != nil {
+		return 0, nil, "", err
+	}
+	for name, values := range headers {
+		r.Header[name] = values
+	}
 	if body != "" && r.Header.Get("Content-Type") == "" {
 		r.Header.Set("Content-Type", "application/json")
 	}
-	response, err := h.client.Do(r)
+	conn, err := net.Dial("unix", h.socket)
 	if err != nil {
-		t.Fatal(err)
+		return 0, nil, "", err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if err = r.WriteProxy(conn); err != nil {
+		return 0, nil, "", err
+	}
+	response, err := http.ReadResponse(bufio.NewReader(conn), r)
+	if err != nil {
+		return 0, nil, "", err
 	}
 	defer response.Body.Close()
 	data, err := io.ReadAll(response.Body)
+	return response.StatusCode, response.Header, string(data), err
+}
+
+func (h *harness) request(t *testing.T, method, target, body string, headers http.Header) (int, http.Header, string) {
+	t.Helper()
+	status, header, data, err := h.do(method, target, body, headers)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return response.StatusCode, response.Header, string(data)
+	return status, header, data
+}
+
+func restSchema(t *testing.T) *schema.RESTSchema {
+	t.Helper()
+	spec, err := os.ReadFile("../schema/testdata/github-rest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rest, err := schema.CompileREST(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rest
+}
+
+// installREST pins the reviewed REST schema on the test upstream.
+func (h *harness) installREST(t *testing.T) {
+	t.Helper()
+	up := h.upstream()
+	up.Plugin, up.REST = "github", restSchema(t)
+	h.install(t, "rest", policyFor(t, "rest-policy", true), managerFor(t, testToken), up)
+}
+
+// testAuthority writes a CA to disk and loads it the way a deployment would.
+func testAuthority(t *testing.T) (*intercept.Authority, *x509.CertPool) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "pdp test interception CA"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certificateFile, keyFile := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
+	if err = os.WriteFile(certificateFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	authority, err := intercept.Load(certificateFile, keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(certificate)
+	return authority, roots
 }
 
 // These tests use kernel-authenticated Unix clients, the real policy/adapter
 // pipeline and verified TLS endpoints. They protect the gateway boundary itself.
 func TestUnixTLSForward(t *testing.T) {
 	var calls atomic.Int64
-	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+	var redirected atomic.Int64
+	elsewhere := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { redirected.Add(1) }))
+	defer elsewhere.Close()
+	var h *harness
+	h = newHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		if r.TLS == nil || r.URL.Path != "/repos/team/project/issues" || r.Host == "evil.invalid" {
+		if r.TLS == nil || r.Host != net.JoinHostPort(testHost, strconv.Itoa(h.port)) {
 			t.Error("destination was not fixed")
 		}
 		if r.Header.Get("Authorization") != "Bearer "+testToken {
 			t.Error("credential injection failed")
 		}
-		for _, name := range []string{"Cookie", "X-Principal", "X-API-Key", "Proxy-Authorization", "X-Forwarded-For", "X-Custom-Hop"} {
+		for _, name := range []string{"Cookie", "Proxy-Authorization", "X-Custom-Hop"} {
 			if r.Header.Get(name) != "" {
 				t.Errorf("caller header forwarded: %s", name)
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Set-Cookie", testToken)
-		w.Header().Set("WWW-Authenticate", testToken)
-		w.Header().Set("X-Debug", testToken)
-		w.Header().Set("Location", "https://evil.invalid/"+testToken)
-		w.Header().Set("Connection", "X-Ratelimit-Remaining")
-		w.Header().Set("X-RateLimit-Remaining", "7")
-		_, _ = io.WriteString(w, `{"ok":true}`)
+		switch r.URL.Path {
+		case "/reflected-header":
+			w.Header().Set("X-Debug", testToken)
+		case "/redirect":
+			w.Header().Set("Location", elsewhere.URL)
+			w.WriteHeader(302)
+			return
+		}
+		_, _ = io.WriteString(w, "plain text, not JSON")
 	}, true, Options{})
-	headers := http.Header{"Authorization": {"Bearer caller"}, "Cookie": {"caller-secret"}, "X-Principal": {"root"}, "X-Api-Key": {"caller-key"}, "Proxy-Authorization": {"caller-proxy"}, "X-Forwarded-For": {"untrusted"}, "Connection": {"X-Custom-Hop"}, "X-Custom-Hop": {"untrusted"}}
-	status, response, body := h.request(t, "GET", "/upstreams/github/repos/team/project/issues", "", headers)
-	if status != 200 || body != `{"ok":true}` || calls.Load() != 1 {
+	headers := http.Header{"Authorization": {"Bearer caller"}, "Cookie": {"caller-secret"}, "Proxy-Authorization": {"caller-proxy"}, "Connection": {"X-Custom-Hop"}, "X-Custom-Hop": {"untrusted"}}
+	status, _, body := h.request(t, "GET", "/repos/team/project/issues?state=open", "", headers)
+	if status != 200 || body != "plain text, not JSON" || calls.Load() != 1 {
 		t.Fatalf("status=%d body=%s calls=%d", status, body, calls.Load())
 	}
-	for name, values := range response {
-		if strings.Contains(strings.Join(values, ""), testToken) {
-			t.Errorf("response leaked via %s", name)
-		}
+	var response http.Header
+	if status, _, body = h.request(t, "GET", "/reflected-header", "", http.Header{}); status != 502 || strings.Contains(body, testToken) {
+		t.Fatalf("credential reflected in a response header: status=%d", status)
 	}
-	if response.Get("Set-Cookie") != "" || response.Get("Location") != "" || response.Get("WWW-Authenticate") != "" {
-		t.Fatal("sensitive response headers forwarded")
+	// A redirect goes back to the caller, whose next request is authorized on its own.
+	if status, response, _ = h.request(t, "GET", "/redirect", "", http.Header{}); status != 302 || response.Get("Location") != elsewhere.URL || redirected.Load() != 0 {
+		t.Fatalf("redirect was followed or dropped: status=%d", status)
 	}
-	if response.Get("X-RateLimit-Remaining") != "" {
-		t.Fatal("connection-nominated response header forwarded")
-	}
-	h.eventsMu.Lock()
-	audit, _ := json.Marshal(h.events)
-	h.eventsMu.Unlock()
-	if strings.Contains(string(audit), testToken) || strings.Contains(string(audit), "caller-secret") || strings.Contains(string(audit), "/repos/") {
+	audit, _ := json.Marshal(h.audit())
+	if strings.Contains(string(audit), testToken) || strings.Contains(string(audit), "caller-secret") || strings.Contains(string(audit), "/repos/") || strings.Contains(string(audit), "state=open") {
 		t.Fatalf("audit contains request values: %s", audit)
 	}
+	if first := h.audit()[0]; first.Host != testHost || first.Port != h.port || first.Binding != "installation" || first.Protocol != "http" || first.Outcome != "forwarded" {
+		t.Fatalf("audit does not name the destination: %+v", first)
+	}
 	metrics := h.g.Metrics()
-	if metrics.Requests != 1 || metrics.Allowed != 1 || metrics.Failed != 0 {
+	if metrics.Requests != 3 || metrics.Allowed != 2 || metrics.Failed != 1 {
 		t.Fatalf("metrics: %+v", metrics)
 	}
 }
 
 func TestDeniedNeverForwards(t *testing.T) {
 	var calls atomic.Int64
-	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{}`)
-	}, false, Options{})
-	status, _, body := h.request(t, "GET", "/upstreams/github/repos/team/project", "", http.Header{"Authorization": {"Bearer trusted"}, "X-Principal": {"alice"}, "X-Uid": {fmt.Sprint(os.Getuid() + 1)}, "X-Spiffe-Id": {"spiffe://example.test/admin"}})
+	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }, false, Options{})
+	status, _, body := h.request(t, "GET", "/repos/team/project", "", http.Header{"Authorization": {"Bearer trusted"}, "X-Principal": {"alice"}, "X-Uid": {fmt.Sprint(os.Getuid() + 1)}, "X-Spiffe-Id": {"spiffe://example.test/admin"}})
 	if status != 403 || calls.Load() != 0 || strings.Contains(body, testToken) {
 		t.Fatalf("denied request crossed boundary: status=%d calls=%d body=%s", status, calls.Load(), body)
 	}
 	// A TCP request cannot acquire Unix identity from headers or a remote address.
 	tcp := httptest.NewServer(h.g)
 	defer tcp.Close()
-	response, err := http.Get(tcp.URL + "/upstreams/github/repos/team/project")
+	proxy, _ := url.Parse(tcp.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 3 * time.Second}
+	response, err := client.Get("http://" + net.JoinHostPort(testHost, strconv.Itoa(h.port)) + "/repos/team/project")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,6 +364,65 @@ func TestDeniedNeverForwards(t *testing.T) {
 	if stats.Hits != 0 || stats.Misses != 0 || stats.Acquisitions != 0 {
 		t.Fatalf("denied peer accessed credentials: %+v", stats)
 	}
+	if len(h.lookups) != 0 {
+		t.Fatalf("denied destination was resolved: %v", h.lookups)
+	}
+}
+
+// A destination nobody configured still goes to policy, which is the only
+// allowlist. It gets no credential, and denied names are never resolved.
+func TestUnlistedDestinationsAreDecidedByPolicy(t *testing.T) {
+	var calls atomic.Int64
+	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("Authorization") != "Bearer callers-own" {
+			t.Errorf("unlisted destination received another credential: %q", r.Header.Get("Authorization"))
+		}
+		_, _ = io.WriteString(w, "open")
+	}, true, Options{})
+	h.install(t, "open", engineFor(t, "open-policy", fmt.Sprintf(`package pdp.authz
+import rego.v1
+default allow := false
+caller if {
+	%s
+}
+allow if {
+	caller
+	input.destination.host == "127.0.0.1"
+	input.http.method == "GET"
+	not input.binding
+}
+allow if {
+	caller
+	input.destination.host == "rebind.test"
+	not loopback
+}
+loopback if {
+	some address in input.destination.addresses
+	net.cidr_contains("127.0.0.0/8", address)
+}
+`, callerRule(true)), nil), managerFor(t, testToken), h.upstream())
+	literal := "https://" + h.address
+	own := http.Header{"Authorization": {"Bearer callers-own"}}
+	if status, _, body := h.request(t, "GET", literal+"/anything", "", own); status != 200 || body != "open" {
+		t.Fatalf("policy-allowed unlisted destination: status=%d body=%s", status, body)
+	}
+	if status, _, _ := h.request(t, "POST", literal+"/anything", "{}", own); status != 403 {
+		t.Fatalf("method the policy does not allow: status=%d", status)
+	}
+	if status, _, _ := h.request(t, "GET", "https://Denied.Test./x", "", own); status != 403 || len(h.lookups) != 0 {
+		t.Fatalf("refused name was resolved or allowed: status=%d lookups=%v", status, h.lookups)
+	}
+	// Allowed by name, refused once policy sees the address it resolves to.
+	if status, _, _ := h.request(t, "GET", "https://rebind.test:"+strconv.Itoa(h.port)+"/x", "", own); status != 403 || len(h.lookups) != 1 || h.lookups[0] != "rebind.test" {
+		t.Fatalf("resolved address was not shown to policy: status=%d lookups=%v", status, h.lookups)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("denied request reached a destination: calls=%d", calls.Load())
+	}
+	if stats := h.g.Metrics().Credentials; stats.Acquisitions != 0 {
+		t.Fatalf("credential acquired for an unlisted destination: %+v", stats)
+	}
 }
 
 func TestAmbiguitiesNeverForward(t *testing.T) {
@@ -244,22 +432,28 @@ func TestAmbiguitiesNeverForward(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{}`)
 	}, true, Options{MaxRequestBytes: 128})
+	h.installREST(t)
+	const repo, comments = "/repos/team/project", "/repos/team/project/issues/1/comments"
+	if status, _, _ := h.request(t, "GET", repo, "", http.Header{}); status != 200 || calls.Load() != 1 {
+		t.Fatalf("unambiguous request: status=%d", status)
+	}
 	cases := []struct {
 		name, method, path, body string
 		headers                  http.Header
 	}{
-		{"encoded slash", "GET", "/upstreams/github/repos/a%2Fb", "", nil},
-		{"double slash", "GET", "/upstreams/github/repos//a", "", nil},
-		{"dot segment", "GET", "/upstreams/github/repos/../a", "", nil},
-		{"duplicate query", "GET", "/upstreams/github/repos/a?x=1&%78=2", "", nil},
-		{"empty query part", "GET", "/upstreams/github/repos/a?x=1&&y=2", "", nil},
-		{"missing query equals", "GET", "/upstreams/github/repos/a?x", "", nil},
-		{"JSON duplicate", "POST", "/upstreams/github/repos/a", `{"a":1,"a":2}`, nil},
-		{"JSON trailing", "POST", "/upstreams/github/repos/a", `{} {}`, nil},
-		{"body array", "POST", "/upstreams/github/repos/a", `[{},{}]`, nil},
-		{"encoding", "POST", "/upstreams/github/repos/a", `{}`, http.Header{"Content-Encoding": {"gzip"}}},
-		{"upgrade", "GET", "/upstreams/github/repos/a", "", http.Header{"Connection": {"upgrade"}, "Upgrade": {"websocket"}}},
-		{"body limit", "POST", "/upstreams/github/repos/a", `{"a":"` + strings.Repeat("x", 130) + `"}`, nil},
+		{"encoded slash", "GET", "/repos/team%2Fproject", "", nil},
+		{"double slash", "GET", "/repos//project", "", nil},
+		{"dot segment", "GET", "/repos/team/../project", "", nil},
+		{"duplicate query", "GET", comments + "?per_page=1&%70er_page=2", "", nil},
+		{"empty query part", "GET", comments + "?per_page=1&&page=2", "", nil},
+		{"missing query equals", "GET", comments + "?per_page", "", nil},
+		{"JSON duplicate", "POST", comments, `{"body":"a","body":"b"}`, nil},
+		{"JSON trailing", "POST", comments, `{"body":"a"} {}`, nil},
+		{"body array", "POST", comments, `[{"body":"a"}]`, nil},
+		{"encoding", "POST", comments, `{"body":"a"}`, http.Header{"Content-Encoding": {"gzip"}}},
+		{"upgrade", "GET", repo, "", http.Header{"Connection": {"upgrade"}, "Upgrade": {"websocket"}}},
+		{"body limit", "POST", comments, `{"body":"` + strings.Repeat("x", 130) + `"}`, nil},
+		{"plaintext scheme", "GET", "http://" + net.JoinHostPort(testHost, strconv.Itoa(h.port)) + repo, "", nil},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -274,17 +468,17 @@ func TestAmbiguitiesNeverForward(t *testing.T) {
 		})
 	}
 	// Exercise HTTP wire framing directly rather than relying on client rewriting.
+	target := h.base + comments
 	for _, raw := range []string{
-		"POST /upstreams/github/a HTTP/1.1\r\nHost: pdp\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
-		"POST /upstreams/github/a HTTP/1.1\r\nHost: pdp\r\nContent-Type: application/json\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+		"POST " + target + " HTTP/1.1\r\nHost: pdp\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\nc\r\n{\"body\":\"a\"}\r\n0\r\n\r\n",
+		"POST " + target + " HTTP/1.1\r\nHost: pdp\r\nContent-Type: application/json\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{\"body\":\"a\"}",
 	} {
 		conn, err := net.Dial("unix", h.socket)
 		if err != nil {
 			t.Fatal(err)
 		}
 		conn.SetDeadline(time.Now().Add(2 * time.Second))
-		_, err = io.WriteString(conn, raw)
-		if err != nil {
+		if _, err = io.WriteString(conn, raw); err != nil {
 			t.Fatal(err)
 		}
 		response, err := http.ReadResponse(bufio.NewReader(conn), nil)
@@ -297,62 +491,59 @@ func TestAmbiguitiesNeverForward(t *testing.T) {
 			t.Fatalf("wire ambiguity status=%d", response.StatusCode)
 		}
 	}
-	if calls.Load() != 0 {
+	if calls.Load() != 1 {
 		t.Fatalf("invalid request reached upstream %d times", calls.Load())
 	}
 }
 
 func TestResponseBoundary(t *testing.T) {
 	var targetCalls atomic.Int64
-	redirect := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		targetCalls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{}`)
-	}))
+	redirect := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { targetCalls.Add(1) }))
 	defer redirect.Close()
 	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/redirect":
+		switch strings.TrimPrefix(r.URL.Path, "/repos/case/") {
+		case "redirect":
 			w.Header().Set("Location", redirect.URL)
 			w.WriteHeader(302)
-		case "/large":
+		case "large":
 			_, _ = io.WriteString(w, strings.Repeat("x", 257))
-		case "/stream":
+		case "stream":
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = io.WriteString(w, "data: secret\n")
-		case "/compressed":
+		case "compressed":
 			w.Header().Set("Content-Encoding", "gzip")
 			_, _ = io.WriteString(w, "not gzip")
-		case "/error":
+		case "error":
 			w.WriteHeader(400)
 			_, _ = fmt.Fprintf(w, `{"error":%q}`, r.Header.Get("Authorization"))
-		case "/safe-error":
+		case "safe-error":
 			w.WriteHeader(400)
 			_, _ = io.WriteString(w, `{"errors":[{"message":"invalid field"}]}`)
-		case "/reflect":
+		case "reflect":
 			_, _ = fmt.Fprintf(w, `{"debug":%q}`, r.Header.Get("Authorization"))
-		case "/escaped", "/escaped-error":
-			if r.URL.Path == "/escaped-error" {
+		case "escaped", "escaped-error":
+			if strings.HasSuffix(r.URL.Path, "-error") {
 				w.WriteHeader(400)
 			}
 			_, _ = io.WriteString(w, `{"debug":"`+strings.ReplaceAll(testToken, "p", `\u0070`)+`"}`)
-		case "/malformed", "/malformed-error":
-			if r.URL.Path == "/malformed-error" {
+		case "malformed", "malformed-error":
+			if strings.HasSuffix(r.URL.Path, "-error") {
 				w.WriteHeader(400)
 			}
 			_, _ = io.WriteString(w, `not-json {"debug":"`+strings.ReplaceAll(testToken, "p", `\u0070`)+`"}`)
 		}
 	}, true, Options{MaxResponseBytes: 256})
+	h.installREST(t)
 	for _, path := range []string{"redirect", "large", "stream", "compressed", "reflect", "escaped", "malformed", "error", "escaped-error", "malformed-error"} {
 		t.Run(path, func(t *testing.T) {
-			status, headers, body := h.request(t, "GET", "/upstreams/github/"+path, "", http.Header{})
+			status, headers, body := h.request(t, "GET", "/repos/case/"+path, "", http.Header{})
 			if status != 502 || strings.Contains(body, testToken) || headers.Get("Location") != "" {
 				t.Fatalf("status=%d body=%s", status, body)
 			}
 		})
 	}
-	status, _, body := h.request(t, "GET", "/upstreams/github/safe-error", "", http.Header{})
+	status, _, body := h.request(t, "GET", "/repos/case/safe-error", "", http.Header{})
 	if status != 400 || body != `{"errors":[{"message":"invalid field"}]}` {
 		t.Fatalf("safe provider error changed: %d %s", status, body)
 	}
@@ -371,7 +562,6 @@ func TestAtomicReload(t *testing.T) {
 			close(started)
 			<-finish
 		}
-		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"done":true}`)
 	}, true, Options{})
 	conn, err := net.Dial("unix", h.socket)
@@ -385,7 +575,7 @@ func TestAtomicReload(t *testing.T) {
 	reader := bufio.NewReader(conn)
 	onExistingConnection := func() int {
 		t.Helper()
-		if _, err := io.WriteString(conn, "GET /upstreams/github/warm HTTP/1.1\r\nHost: pdp\r\n\r\n"); err != nil {
+		if _, err := io.WriteString(conn, "GET "+h.base+"/warm HTTP/1.1\r\nHost: pdp\r\n\r\n"); err != nil {
 			t.Fatal(err)
 		}
 		response, err := http.ReadResponse(reader, nil)
@@ -403,28 +593,15 @@ func TestAtomicReload(t *testing.T) {
 	}
 	result := make(chan int, 1)
 	go func() {
-		r, err := h.client.Get("http://pdp/upstreams/github/hold")
-		if err != nil {
-			result <- 0
-			return
-		}
-		defer r.Body.Close()
-		io.Copy(io.Discard, r.Body)
-		result <- r.StatusCode
+		status, _, _, _ := h.do("GET", "/hold", "", http.Header{})
+		result <- status
 	}()
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream did not start")
 	}
-	authenticator := auth.NewUnix()
-	next, err := NewSnapshot(SnapshotConfig{Version: "v2", Authenticator: authenticator, Policy: policyFor(t, "p2", false), Credentials: managerFor(t, "rotated-provider-token"), Routes: []Route{{Provider: "github", Binding: "installation", UpstreamURL: h.endpoint}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = h.g.Reload(next); err != nil {
-		t.Fatal(err)
-	}
+	h.install(t, "v2", policyFor(t, "p2", false), managerFor(t, "rotated-provider-token"), h.upstream())
 	select {
 	case <-h.snapshot.done:
 		t.Fatal("old snapshot disposed while request in flight")
@@ -446,10 +623,8 @@ func TestAtomicReload(t *testing.T) {
 	if err = h.snapshot.WaitDrained(ctx); err != nil {
 		t.Fatal(err)
 	}
-	h.eventsMu.Lock()
-	defer h.eventsMu.Unlock()
 	revisions := map[string]string{}
-	for _, event := range h.events {
+	for _, event := range h.audit() {
 		revisions[event.Snapshot] = event.PolicyRevision
 	}
 	if revisions["v1"] != "p1" || revisions["v2"] != "p2" {
@@ -461,7 +636,7 @@ func TestTLSAndExecutionBounds(t *testing.T) {
 	t.Run("untrusted certificate", func(t *testing.T) {
 		var calls atomic.Int64
 		h := newHarness(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }, true, Options{RootCAs: x509.NewCertPool()})
-		status, _, body := h.request(t, "GET", "/upstreams/github/private", "", http.Header{})
+		status, _, body := h.request(t, "GET", "/private", "", http.Header{})
 		if status != 502 || calls.Load() != 0 || strings.Contains(body, testToken) {
 			t.Fatalf("unverified upstream accepted: status=%d calls=%d", status, calls.Load())
 		}
@@ -479,21 +654,15 @@ func TestTLSAndExecutionBounds(t *testing.T) {
 		}, true, Options{MaxConcurrent: 1, RequestTimeout: 300 * time.Millisecond})
 		result := make(chan int, 1)
 		go func() {
-			r, err := h.client.Get("http://pdp/upstreams/github/slow")
-			if err != nil {
-				result <- 0
-				return
-			}
-			defer r.Body.Close()
-			io.Copy(io.Discard, r.Body)
-			result <- r.StatusCode
+			status, _, _, _ := h.do("GET", "/slow", "", http.Header{})
+			result <- status
 		}()
 		select {
 		case <-started:
 		case <-time.After(2 * time.Second):
 			t.Fatal("request did not start")
 		}
-		status, _, _ := h.request(t, "GET", "/upstreams/github/other", "", http.Header{})
+		status, _, _ := h.request(t, "GET", "/other", "", http.Header{})
 		if status != 503 || calls.Load() != 1 {
 			t.Fatalf("concurrency bound exceeded status=%d calls=%d", status, calls.Load())
 		}
@@ -514,14 +683,7 @@ func TestTLSAndExecutionBounds(t *testing.T) {
 }
 
 func TestSchemaPolicyInput(t *testing.T) {
-	spec, err := os.ReadFile("../schema/testdata/github-rest.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	rest, err := schema.CompileREST(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rest := restSchema(t)
 	module, err := os.ReadFile("testdata/repository.rego")
 	if err != nil {
 		t.Fatal(err)
@@ -539,14 +701,9 @@ func TestSchemaPolicyInput(t *testing.T) {
 			"identity_tasks":    map[string]any{fmt.Sprintf("uid:%d", os.Getuid()): task},
 			"task_repositories": map[string]any{"task-1": []any{"team/project"}},
 		}
-		engine := engineFor(t, "scoped-policy", string(module), data)
-		s, err := NewSnapshot(SnapshotConfig{Version: version, Authenticator: auth.NewUnix(), Policy: engine, Credentials: managerFor(t, testToken), Routes: []Route{{Provider: "github", Binding: "installation", UpstreamURL: h.endpoint, REST: rest}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = h.g.Reload(s); err != nil {
-			t.Fatal(err)
-		}
+		up := h.upstream()
+		up.Plugin, up.REST = "github", rest
+		h.install(t, version, engineFor(t, "scoped-policy", string(module), data), managerFor(t, testToken), up)
 	}
 	install("scoped-v1", "task-1")
 	for _, test := range []struct {
@@ -558,20 +715,18 @@ func TestSchemaPolicyInput(t *testing.T) {
 		{"/repos/team/project/issues/1/comments?per_page=10", 200},
 		{"/repos/team/project/issues/1/comments?per_page=11", 403},
 	} {
-		status, _, _ := h.request(t, "GET", "/upstreams/github"+test.path, "", http.Header{})
+		status, _, _ := h.request(t, "GET", test.path, "", http.Header{})
 		if status != test.status {
 			t.Fatalf("%s: status %d", test.path, status)
 		}
 	}
 	install("scoped-v2", "unlinked-task")
-	status, _, _ := h.request(t, "GET", "/upstreams/github/repos/team/project", "", http.Header{"X-Task-Id": {"task-1"}})
+	status, _, _ := h.request(t, "GET", "/repos/team/project", "", http.Header{"X-Task-Id": {"task-1"}})
 	if status != 403 || calls.Load() != 2 {
 		t.Fatalf("scope/task restriction bypass status=%d calls=%d", status, calls.Load())
 	}
-	h.eventsMu.Lock()
-	defer h.eventsMu.Unlock()
-	for _, event := range h.events {
-		if event.Outcome == "forwarded" && (event.SchemaDigest != rest.Digest() || event.Principal != fmt.Sprintf("uid:%d", os.Getuid()) || len(event.MatchedRules) != 1) {
+	for _, event := range h.audit() {
+		if event.Outcome == "forwarded" && (event.SchemaDigest != rest.Digest() || event.Plugin != "github" || event.Principal != fmt.Sprintf("uid:%d", os.Getuid()) || len(event.MatchedRules) != 1) {
 			t.Fatalf("incomplete audit snapshot: %+v", event)
 		}
 	}
@@ -600,24 +755,21 @@ func TestLinearGraphQLBoundary(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"data":{"issue":{"id":"APP-1","title":"read"}}}`)
 	}, true, Options{})
-	snapshot, err := NewSnapshot(SnapshotConfig{Version: "graphql-v1", Authenticator: auth.NewUnix(), Policy: engine, Credentials: managerForProvider(t, testToken, "linear"), Routes: []Route{{Provider: "linear", Binding: "installation", UpstreamURL: h.endpoint + "/graphql", GraphQL: gql}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = h.g.Reload(snapshot); err != nil {
-		t.Fatal(err)
-	}
+	up := h.upstream()
+	up.Plugin, up.GraphQL = "linear", gql
+	h.install(t, "graphql-v1", engine, managerFor(t, testToken), up)
 	for _, test := range []struct {
-		body   string
-		status int
+		path, body string
+		status     int
 	}{
-		{`{"query":"query Read($id:String!){ alias:issue(id:$id){ id title } }","variables":{"id":"APP-1"}}`, 200},
-		{`{"query":"{ a:issue(id:\"APP-1\"){ id } b:issue(id:\"APP-2\"){ id } }"}`, 403},
-		{`{"query":"{ issue(id:\"APP-1\"){ title:description } }"}`, 403},
-		{`[{"query":"{ issue(id:\"APP-1\"){ id } }"}]`, 400},
-		{`{"query":"subscription { issue(id:\"APP-1\"){ id } }"}`, 400},
+		{"/graphql", `{"query":"query Read($id:String!){ alias:issue(id:$id){ id title } }","variables":{"id":"APP-1"}}`, 200},
+		{"/graphql", `{"query":"{ a:issue(id:\"APP-1\"){ id } b:issue(id:\"APP-2\"){ id } }"}`, 403},
+		{"/graphql", `{"query":"{ issue(id:\"APP-1\"){ title:description } }"}`, 403},
+		{"/graphql", `[{"query":"{ issue(id:\"APP-1\"){ id } }"}]`, 400},
+		{"/graphql", `{"query":"subscription { issue(id:\"APP-1\"){ id } }"}`, 400},
+		{"/other", `{"query":"{ issue(id:\"APP-1\"){ id } }"}`, 400},
 	} {
-		status, _, _ := h.request(t, "POST", "/upstreams/linear/graphql", test.body, http.Header{})
+		status, _, _ := h.request(t, "POST", test.path, test.body, http.Header{})
 		if status != test.status {
 			t.Fatalf("GraphQL status=%d want=%d", status, test.status)
 		}
@@ -629,14 +781,9 @@ func TestLinearGraphQLBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err = NewSnapshot(SnapshotConfig{Version: "graphql-v2", Authenticator: auth.NewUnix(), Policy: engine, Credentials: managerForProvider(t, testToken, "linear"), Routes: []Route{{Provider: "linear", Binding: "installation", UpstreamURL: h.endpoint + "/graphql", GraphQL: changed}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = h.g.Reload(snapshot); err != nil {
-		t.Fatal(err)
-	}
-	status, _, _ := h.request(t, "POST", "/upstreams/linear/graphql", `{"query":"{ issue(id:\"APP-1\") { id title } }"}`, http.Header{})
+	up.GraphQL = changed
+	h.install(t, "graphql-v2", engine, managerFor(t, testToken), up)
+	status, _, _ := h.request(t, "POST", "/graphql", `{"query":"{ issue(id:\"APP-1\") { id title } }"}`, http.Header{})
 	if status != 403 || calls.Load() != 1 {
 		t.Fatalf("schema digest pin bypassed: status=%d calls=%d", status, calls.Load())
 	}

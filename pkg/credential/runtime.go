@@ -199,7 +199,7 @@ func (e *execution) static(_ *starlark.Thread, b *starlark.Builtin, args starlar
 			return nil, failure(CodeInvalid)
 		}
 	case Header:
-		if !validHeader(header) {
+		if !ValidHeader(header) {
 			return nil, failure(CodeInvalid)
 		}
 	default:

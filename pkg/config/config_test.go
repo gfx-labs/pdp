@@ -69,7 +69,8 @@ func TestLoadAuthoredPolicySnapshot(t *testing.T) {
 		}
 		defer loaded.Close()
 		decision, err := loaded.Policy.Evaluate(context.Background(), policy.Input{
-			Version: policy.InputVersion, Identity: policy.Identity{ID: "uid:123"}, Provider: "provider", Binding: "binding", Operations: []policy.OperationInput{{ID: "read"}},
+			Version: policy.InputVersion, Identity: policy.Identity{ID: "uid:123"}, Protocol: policy.ProtocolHTTP,
+			Destination: policy.Destination{Scheme: "https", Host: "api.example.test", Port: 443}, HTTP: &policy.HTTPInput{Method: "GET", Path: "/"},
 		})
 		if err != nil || decision.Allow {
 			t.Fatalf("policy without data did not evaluate its authored default: decision=%+v err=%v", decision, err)
@@ -117,9 +118,9 @@ matched_rules := [] if not allow
 				t.Fatal("external adapter was not frozen into the snapshot")
 			}
 			input := policy.Input{
-				Version: policy.InputVersion, Identity: policy.Identity{ID: "uid:123", AuthMethod: "unix"}, Provider: "provider", Binding: "binding",
-				Operations: []policy.OperationInput{{ID: "read"}},
-				HTTP:       policy.HTTPInput{Body: map[string]any{"counter": json.Number(notation), "options": map[string]any{"timeout": "5s", "max_age": "1m"}}},
+				Version: policy.InputVersion, Identity: policy.Identity{ID: "uid:123", AuthMethod: "unix"}, Protocol: policy.ProtocolHTTP, Binding: "binding",
+				Destination: policy.Destination{Scheme: "https", Host: "api.example.test", Port: 443},
+				HTTP:        &policy.HTTPInput{Method: "POST", Path: "/", Body: map[string]any{"counter": json.Number(notation), "options": map[string]any{"timeout": "5s", "max_age": "1m"}}},
 			}
 			decision, err := loaded.Policy.Evaluate(context.Background(), input)
 			if err != nil || !decision.Allow || len(decision.MatchedRules) != 1 || decision.MatchedRules[0] != "exact-data" {
@@ -152,7 +153,7 @@ func TestLoadRejectsLegacyAndNonJSONConfiguration(t *testing.T) {
 			assertRejected(t, f.path(t))
 		})
 	}
-	for _, key := range []string{"identities", "principal_tasks", "grants", "mode", "custom_modules"} {
+	for _, key := range []string{"identities", "principal_tasks", "grants", "mode", "custom_modules", "routes"} {
 		t.Run(key, func(t *testing.T) {
 			f := newFixture(t)
 			f.doc[key] = map[string]any{}
@@ -167,10 +168,10 @@ func TestLoadRejectsLegacyAndNonJSONConfiguration(t *testing.T) {
 		assertRejected(t, f.path(t))
 	})
 	for name, contents := range map[string]string{
-		"yaml":         "version: pdp.config/v2\nrevision: yaml\npolicy:\n  modules: [authz.rego]\n",
-		"yaml-json":    "# YAML comment\n{\"version\":\"pdp.config/v2\"}",
-		"duplicate":    `{"version":"pdp.config/v2","version":"pdp.config/v2"}`,
-		"trailing":     `{"version":"pdp.config/v2"} {}`,
+		"yaml":         "version: pdp.config/v3\nrevision: yaml\npolicy:\n  modules: [authz.rego]\n",
+		"yaml-json":    "# YAML comment\n{\"version\":\"pdp.config/v3\"}",
+		"duplicate":    `{"version":"pdp.config/v3","version":"pdp.config/v3"}`,
+		"trailing":     `{"version":"pdp.config/v3"} {}`,
 		"array":        `[]`,
 		"null":         `null`,
 		"nested-dupes": `{"transport":{"unix_socket":"one","unix_socket":"two"}}`,
@@ -189,7 +190,7 @@ func TestLoadDependencyValidation(t *testing.T) {
 		change func(*testing.T, *fixture)
 	}{
 		{"no modules", func(t *testing.T, f *fixture) { f.doc["policy"] = map[string]any{} }},
-		{"old config version", func(t *testing.T, f *fixture) { f.doc["version"] = "pdp.config/v1" }},
+		{"old config version", func(t *testing.T, f *fixture) { f.doc["version"] = "pdp.config/v2" }},
 		{"missing module", func(t *testing.T, f *fixture) {
 			f.doc["policy"] = map[string]any{"modules": []string{"missing.rego"}}
 		}},
@@ -232,11 +233,24 @@ func TestLoadDependencyValidation(t *testing.T) {
 		{"oversized adapter", func(t *testing.T, f *fixture) {
 			f.write(t, "adapter.star", strings.Repeat(" ", config.MaxAdapterBytes+1))
 		}},
-		{"unknown route schema", func(t *testing.T, f *fixture) {
-			f.doc["routes"] = []config.Route{{Provider: "provider", Binding: "binding", Schema: "missing"}}
+		{"unknown upstream schema", func(t *testing.T, f *fixture) {
+			f.doc["upstreams"] = []config.Upstream{{Host: "api.example.test", Binding: "binding", Schema: "missing"}}
 		}},
-		{"duplicate provider route", func(t *testing.T, f *fixture) {
-			f.doc["routes"] = []config.Route{{Provider: "provider", Binding: "binding"}, {Provider: "provider", Binding: "binding"}}
+		{"binding and bindings", func(t *testing.T, f *fixture) {
+			f.doc["upstreams"] = []config.Upstream{{Host: "api.example.test", Binding: "binding", Bindings: []string{"binding"}}}
+		}},
+		{"unknown tls mode", func(t *testing.T, f *fixture) {
+			f.doc["upstreams"] = []config.Upstream{{Host: "api.example.test", TLS: "passthrough"}}
+		}},
+		{"transparent https without interception", func(t *testing.T, f *fixture) {
+			f.doc["transport"].(map[string]any)["transparent"] = map[string]any{"https": ":443"}
+		}},
+		{"dns forward without resolver", func(t *testing.T, f *fixture) {
+			f.doc["transport"].(map[string]any)["transparent"] = map[string]any{"http": ":80"}
+			f.doc["dns"] = map[string]any{"listen": ":53", "address": "10.16.0.1"}
+		}},
+		{"dns without transparent listener", func(t *testing.T, f *fixture) {
+			f.doc["dns"] = map[string]any{"listen": ":53", "address": "10.16.0.1", "unlisted": "refuse"}
 		}},
 		{"invalid CA", func(t *testing.T, f *fixture) {
 			f.write(t, "ca.pem", "not a certificate")

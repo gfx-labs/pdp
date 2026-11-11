@@ -7,7 +7,8 @@ default allow := false
 allow if {
 	input.identity.auth_method == "unix"
 	input.identity.uid == data.peer_uid
-	input.provider == "github"
+	input.destination.host == "example.com"
+	input.plugin == "github"
 	input.binding == "installation"
 	input.schema_digest == "sha256:e5144f87c069a92de5d96588a6b4b4c8614f1f88c9f52b012a7dd63704a0ca89"
 	input.http.method == "GET"

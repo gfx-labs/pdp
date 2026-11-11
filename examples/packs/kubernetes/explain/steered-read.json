@@ -1,0 +1,7 @@
+{
+  "version": "pdp.authz/v2",
+  "identity": {"id": "ip:10.244.3.17", "auth_method": "transparent", "ip": "10.244.3.17"},
+  "protocol": "http",
+  "destination": {"scheme": "https", "host": "pypi.org", "port": 443},
+  "http": {"method": "GET", "path": "/simple/requests/"}
+}

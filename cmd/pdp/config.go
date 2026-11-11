@@ -8,21 +8,31 @@ import (
 	"flag"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/gfx-labs/pdp/pkg/auth"
 	"github.com/gfx-labs/pdp/pkg/config"
 	"github.com/gfx-labs/pdp/pkg/gateway"
+	"github.com/gfx-labs/pdp/pkg/intercept"
 	"github.com/gfx-labs/pdp/pkg/policy"
 )
 
 type combinedAuth struct {
-	unix   auth.Authenticator
-	spiffe auth.Authenticator
+	unix        auth.Authenticator
+	spiffe      auth.Authenticator
+	transparent bool
 }
 
 func (a combinedAuth) Authenticate(r *http.Request) (auth.Identity, error) {
+	// A steered connection is never promoted to a Unix or SPIFFE identity.
+	if auth.IsTransparent(r.Context()) {
+		if a.transparent {
+			return auth.Transparent{}.Authenticate(r)
+		}
+		return auth.Identity{}, auth.ErrUnauthenticated
+	}
 	if r.TLS != nil {
 		if a.spiffe != nil {
 			return a.spiffe.Authenticate(r)
@@ -36,7 +46,7 @@ func (a combinedAuth) Authenticate(r *http.Request) (auth.Identity, error) {
 }
 
 func validateTransport(c config.Config) error {
-	if c.Transport.UnixSocket == "" && c.Transport.SPIFFE == nil {
+	if c.Transport.UnixSocket == "" && c.Transport.SPIFFE == nil && c.Transport.Transparent == nil {
 		return errors.New("at least one listening transport is required")
 	}
 	mode, err := strconv.ParseUint(c.Transport.SocketMode, 8, 32)
@@ -52,16 +62,38 @@ func validateTransport(c config.Config) error {
 }
 
 func snapshot(l *config.Loaded, a auth.Authenticator) (*gateway.Snapshot, error) {
-	routes := make([]gateway.Route, 0, len(l.Config.Routes))
-	for _, r := range l.Config.Routes {
-		routes = append(routes, gateway.Route{Provider: r.Provider, Binding: r.Binding, UpstreamURL: r.UpstreamURL, Scopes: r.Scopes, REST: l.REST[r.Schema], GraphQL: l.GraphQL[r.Schema]})
+	upstreams := make([]gateway.Upstream, 0, len(l.Config.Upstreams))
+	for _, u := range l.Config.Upstreams {
+		upstreams = append(upstreams, gateway.Upstream{Host: u.Host, Port: u.Port, Tunnel: u.TLS == "tunnel", Bindings: u.Bindings, Scopes: u.Scopes,
+			Plugin: u.Schema, REST: l.REST[u.Schema], GraphQL: l.GraphQL[u.Schema], GraphQLPath: u.GraphQLPath, TokenPaths: u.TokenPaths})
 	}
-	return gateway.NewSnapshot(gateway.SnapshotConfig{Version: l.Config.Revision, Authenticator: a, Routes: routes, Policy: l.Policy, Credentials: l.Credentials})
+	return gateway.NewSnapshot(gateway.SnapshotConfig{Version: l.Config.Revision, Authenticator: a, Upstreams: upstreams, Policy: l.Policy, Credentials: l.Credentials})
 }
 
-func gatewayOptions(l *config.Loaded) gateway.Options {
+// gatewayOptions reads the interception key only when serving. Offline
+// validation must work without that deployment secret.
+func gatewayOptions(l *config.Loaded, serving bool) (gateway.Options, error) {
 	x := l.Config.Limits
-	return gateway.Options{MaxRequestBytes: x.MaxRequestBytes, MaxResponseBytes: x.MaxResponseBytes, MaxHeaderBytes: x.MaxHeaderBytes, MaxConcurrent: x.MaxConcurrent, RequestTimeout: x.RequestTimeout, RootCAs: l.RootCAs}
+	o := gateway.Options{MaxRequestBytes: x.MaxRequestBytes, MaxResponseBytes: x.MaxResponseBytes, MaxHeaderBytes: x.MaxHeaderBytes, MaxConcurrent: x.MaxConcurrent, RequestTimeout: x.RequestTimeout, StreamTimeout: x.StreamTimeout, RootCAs: l.RootCAs}
+	if i := l.Config.Interception; i != nil && serving {
+		authority, err := intercept.Load(i.CertificateFile, i.KeyFile)
+		if err != nil {
+			return o, err
+		}
+		o.Interception = authority
+	}
+	return o, nil
+}
+
+// steeredNames are the names DNS answers with the gateway address: every
+// upstream host plus the configured patterns, and nothing else.
+func steeredNames(c config.Config) []string {
+	names := append([]string(nil), c.DNS.Intercept...)
+	for _, u := range c.Upstreams {
+		names = append(names, u.Host)
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
 }
 
 func validateCommand(args []string, out, errout io.Writer) error {
@@ -88,7 +120,11 @@ func validateCommand(args []string, out, errout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	g, err := gateway.New(s, gatewayOptions(l))
+	opts, err := gatewayOptions(l, false)
+	if err != nil {
+		return err
+	}
+	g, err := gateway.New(s, opts)
 	if err != nil {
 		return err
 	}
@@ -104,7 +140,7 @@ func explainCommand(args []string, out, errout io.Writer) error {
 	fs := flag.NewFlagSet("explain", flag.ContinueOnError)
 	fs.SetOutput(errout)
 	path := fs.String("config", "pdp.json", "administrator configuration file")
-	inputPath := fs.String("input", "", "trusted pdp.authz/v1 input JSON file")
+	inputPath := fs.String("input", "", "trusted pdp.authz/v2 input JSON file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

@@ -10,9 +10,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"reflect"
+	"slices"
 	"strconv"
 	"syscall"
 	"time"
@@ -20,10 +22,11 @@ import (
 	"github.com/gfx-labs/pdp/pkg/auth"
 	"github.com/gfx-labs/pdp/pkg/config"
 	"github.com/gfx-labs/pdp/pkg/gateway"
+	"github.com/gfx-labs/pdp/pkg/steer"
 )
 
 func runtimeAuth(c config.Config, source *auth.SPIFFE) (auth.Authenticator, error) {
-	var a combinedAuth
+	a := combinedAuth{transparent: c.Transport.Transparent != nil}
 	if c.Transport.UnixSocket != "" {
 		a.unix = auth.NewUnix()
 	}
@@ -36,10 +39,18 @@ func runtimeAuth(c config.Config, source *auth.SPIFFE) (auth.Authenticator, erro
 	return a, nil
 }
 
-// Transport changes require restart. Which identities are allowed is policy, so
-// it changes with a snapshot without replacing listeners or open connections.
+// Transport, interception and DNS changes require restart. Policy, upstreams and
+// credentials change with a snapshot without replacing listeners or open
+// connections. The DNS server is not part of a snapshot, so a reload that
+// changes which names it intercepts is rejected.
 func sameRuntime(a, b config.Config) bool {
 	if a.Transport.UnixSocket != b.Transport.UnixSocket || a.Transport.SocketMode != b.Transport.SocketMode || a.CAFile != b.CAFile || !reflect.DeepEqual(a.Limits, b.Limits) {
+		return false
+	}
+	if !reflect.DeepEqual(a.Transport.Transparent, b.Transport.Transparent) || !reflect.DeepEqual(a.Interception, b.Interception) || !reflect.DeepEqual(a.DNS, b.DNS) {
+		return false
+	}
+	if a.DNS != nil && !slices.Equal(steeredNames(a), steeredNames(b)) {
 		return false
 	}
 	as, bs := a.Transport.SPIFFE, b.Transport.SPIFFE
@@ -91,7 +102,10 @@ func serveCommand(args []string, out, errout io.Writer) error {
 		return err
 	}
 	logger := log.New(errout, "", 0)
-	opts := gatewayOptions(l)
+	opts, err := gatewayOptions(l, true)
+	if err != nil {
+		return err
+	}
 	opts.Audit = func(event gateway.AuditEvent) {
 		b, err := json.Marshal(event)
 		if err == nil {
@@ -138,12 +152,55 @@ func serveCommand(args []string, out, errout io.Writer) error {
 		}
 		listeners = append(listeners, tls.NewListener(listener, source.TLSConfig()))
 	}
-	servers := make([]*http.Server, 0, len(listeners))
-	serverErrors := make(chan error, len(listeners))
+	servers := make([]*http.Server, 0, len(listeners)+2)
+	serverErrors := make(chan error, len(listeners)+3)
 	for _, listener := range listeners {
 		server := gateway.NewHTTPServer(listener.Addr().String(), g)
 		servers = append(servers, server)
 		go func(server *http.Server, listener net.Listener) { serverErrors <- server.Serve(listener) }(server, listener)
+	}
+	if t := l.Config.Transport.Transparent; t != nil {
+		for _, address := range []string{t.HTTP, t.HTTPS} {
+			if address == "" {
+				continue
+			}
+			listener, err := net.Listen("tcp", address)
+			if err != nil {
+				return errors.New("cannot listen on transparent transport")
+			}
+			if address == t.HTTPS {
+				tlsConfig, err := g.TransparentTLSConfig()
+				if err != nil {
+					listener.Close()
+					return err
+				}
+				listener = tls.NewListener(listener, tlsConfig)
+			}
+			listeners = append(listeners, listener)
+			server := gateway.NewTransparentServer(address, g)
+			servers = append(servers, server)
+			go func(server *http.Server, listener net.Listener) { serverErrors <- server.Serve(listener) }(server, listener)
+		}
+	}
+	if d := l.Config.DNS; d != nil {
+		address, err := netip.ParseAddr(d.Address)
+		if err != nil {
+			return errors.New("dns address must be the gateway IP address")
+		}
+		resolver, err := steer.New(steer.Config{Address: address, Names: steeredNames(l.Config), ForwardTo: d.Resolver})
+		if err != nil {
+			return err
+		}
+		packets, err := net.ListenPacket("udp", d.Listen)
+		if err != nil {
+			return errors.New("cannot listen on DNS transport")
+		}
+		defer packets.Close()
+		go func() {
+			if err := resolver.Serve(packets); err != nil && !errors.Is(err, net.ErrClosed) {
+				serverErrors <- err
+			}
+		}()
 	}
 	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), 20*time.Second)

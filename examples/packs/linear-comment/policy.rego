@@ -45,7 +45,9 @@ caller_allowed if {
 default route_expected := false
 
 route_expected if {
-	input.provider == "linear"
+	input.destination.host == "api.linear.app"
+	input.destination.port == 443
+	input.plugin == "linear"
 	input.binding == "linear-installation"
 }
 
@@ -118,7 +120,7 @@ matched_rules contains "issue-read-comment" if allow
 
 reasons contains "caller UID is not allowed" if not caller_allowed
 
-reasons contains "unexpected provider or binding" if not route_expected
+reasons contains "unexpected destination or binding" if not route_expected
 
 reasons contains "schema digest is not the reviewed one" if not schema_reviewed
 

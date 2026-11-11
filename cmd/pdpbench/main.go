@@ -152,13 +152,14 @@ func run() error {
 		Providers: map[string]credential.ProviderConfig{"github": {Script: "def acquire(request):\n    return oauth_client_credentials(endpoint=\"token\", client_id=\"benchmark\", client_secret=secret(\"client_secret\"))\n", Endpoints: map[string]string{"token": upstream.URL + "/oauth"}}},
 		Bindings:  map[string]credential.BindingConfig{"benchmark": {Provider: "github", Secrets: map[string]credential.SecretSource{"client_secret": {File: secret}}}},
 	}
-	authz := fmt.Sprintf("package pdp.authz\n\nimport rego.v1\n\ndefault allow := false\n\nallow if {\n\tinput.identity.auth_method == \"unix\"\n\tinput.identity.uid == %d\n\tinput.provider == \"github\"\n\tinput.binding == \"benchmark\"\n}\n", os.Getuid())
+	port := upstream.Listener.Addr().(*net.TCPAddr).Port
+	authz := fmt.Sprintf("package pdp.authz\n\nimport rego.v1\n\ndefault allow := false\n\nallow if {\n\tinput.identity.auth_method == \"unix\"\n\tinput.identity.uid == %d\n\tinput.destination.host == \"127.0.0.1\"\n\tinput.destination.port == %d\n\tinput.binding == \"benchmark\"\n}\n", os.Getuid(), port)
 	if err := os.WriteFile(filepath.Join(dir, "policy.rego"), []byte(authz), 0600); err != nil {
 		return err
 	}
 	c := config.Config{Version: config.Version, Revision: "benchmark-v1", CAFile: ca,
 		Transport: config.Transport{UnixSocket: socket, SocketMode: "0600"},
-		Routes:    []config.Route{{Provider: "github", Binding: "benchmark", UpstreamURL: upstream.URL}}, Credentials: credentials,
+		Upstreams: []config.Upstream{{Host: "127.0.0.1", Port: port, Binding: "benchmark"}}, Credentials: credentials,
 		Policy: config.Policy{Modules: []string{"policy.rego"}},
 	}
 	encoded, err := json.Marshal(c)
@@ -217,24 +218,46 @@ func run() error {
 		return err
 	}
 	idleElapsed := time.Since(idleStart)
-	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
-	}}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	request := func() (time.Duration, error) {
-		start := time.Now()
-		resp, err := client.Get("http://pdp/upstreams/github/repos/test/repo")
-		if err != nil {
-			return 0, err
+	// Each worker keeps one gateway connection and sends absolute-form requests
+	// on it, which is what a proxy client with keep-alive does.
+	newRequester := func() func() (time.Duration, error) {
+		var conn net.Conn
+		var reader *bufio.Reader
+		return func() (time.Duration, error) {
+			start := time.Now()
+			if conn == nil {
+				c, err := net.Dial("unix", socket)
+				if err != nil {
+					return 0, err
+				}
+				conn, reader = c, bufio.NewReader(c)
+			}
+			fail := func(err error) (time.Duration, error) {
+				conn.Close()
+				conn = nil
+				return 0, err
+			}
+			req, err := http.NewRequest("GET", upstream.URL+"/repos/test/repo", nil)
+			if err != nil {
+				return fail(err)
+			}
+			_ = conn.SetDeadline(start.Add(20 * time.Second))
+			if err = req.WriteProxy(conn); err != nil {
+				return fail(err)
+			}
+			resp, err := http.ReadResponse(reader, req)
+			if err != nil {
+				return fail(err)
+			}
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			resp.Body.Close()
+			if err != nil || resp.StatusCode != 200 || string(body) != `{"ok":true}` {
+				return fail(errors.New("gateway request failed"))
+			}
+			return time.Since(start), nil
 		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		resp.Body.Close()
-		if err != nil || resp.StatusCode != 200 || string(body) != `{"ok":true}` {
-			return 0, errors.New("gateway request failed")
-		}
-		return time.Since(start), nil
 	}
+	request := newRequester()
 	cold, err := request()
 	if err != nil {
 		return err
@@ -277,6 +300,7 @@ func run() error {
 		clients.Add(1)
 		go func() {
 			defer clients.Done()
+			request := newRequester()
 			for {
 				j := int(index.Add(1) - 1)
 				if j >= *n {

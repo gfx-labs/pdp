@@ -35,6 +35,16 @@ type Result struct {
 func (r Result) String() string                { return "credential.Result([redacted])" }
 func (r Result) GoString() string              { return r.String() }
 func (r Result) Format(s fmt.State, verb rune) { _, _ = s.Write([]byte(r.String())) }
+
+// HeaderName is the request header Apply sets. Callers drop the client's value
+// for it before applying, so a placeholder never reaches the provider.
+func (r Result) HeaderName() string {
+	if r.Kind == Header {
+		return r.header
+	}
+	return "Authorization"
+}
+
 func (r Result) Apply(h http.Header) error {
 	if h == nil || r.token == "" || !time.Now().Before(r.ExpiresAt) {
 		return failure(CodeUnavailable)
@@ -56,10 +66,7 @@ func (r Result) Apply(h http.Header) error {
 // ContainsSecret detects reflected credential material in a bounded upstream
 // response without exposing it to the gateway or policy. Call before forwarding
 // response bodies or header values. JSON token iteration retains duplicate keys.
-func (r Result) ContainsSecret(data []byte) bool {
-	if r.token == "" {
-		return false
-	}
+func (r Result) patterns() []string {
 	patterns := []string{r.token}
 	switch r.Kind {
 	case Bearer:
@@ -68,6 +75,14 @@ func (r Result) ContainsSecret(data []byte) bool {
 		encoded := base64.StdEncoding.EncodeToString([]byte(r.username + ":" + r.token))
 		patterns = append(patterns, encoded, "Basic "+encoded)
 	}
+	return patterns
+}
+
+func (r Result) ContainsSecret(data []byte) bool {
+	if r.token == "" {
+		return false
+	}
+	patterns := r.patterns()
 	contains := func(value []byte) bool {
 		for _, pattern := range patterns {
 			if bytes.Contains(value, []byte(pattern)) {
@@ -95,6 +110,51 @@ func (r Result) ContainsSecret(data []byte) bool {
 			return true
 		}
 	}
+}
+
+// Scanner finds credential material in a response that is relayed as it
+// arrives. It matches raw bytes only, not JSON-escaped or compressed forms.
+type Scanner struct {
+	patterns [][]byte
+	held     []byte
+}
+
+func (r Result) Scanner() *Scanner {
+	s := &Scanner{}
+	if r.token != "" {
+		for _, pattern := range r.patterns() {
+			s.patterns = append(s.patterns, []byte(pattern))
+		}
+	}
+	return s
+}
+
+// Next returns the bytes that are safe to send. It keeps back only a trailing
+// run that could be the start of the credential, so no prefix of it is sent.
+func (s *Scanner) Next(chunk []byte) (release []byte, found bool) {
+	data := append(s.held, chunk...)
+	keep := 0
+	for _, pattern := range s.patterns {
+		if bytes.Contains(data, pattern) {
+			s.held = nil
+			return nil, true
+		}
+		for n := min(len(pattern)-1, len(data)); n > keep; n-- {
+			if bytes.HasSuffix(data, pattern[:n]) {
+				keep = n
+				break
+			}
+		}
+	}
+	s.held = append([]byte(nil), data[len(data)-keep:]...)
+	return data[:len(data)-keep], false
+}
+
+// Flush returns the bytes held back when the response ended.
+func (s *Scanner) Flush() []byte {
+	held := s.held
+	s.held = nil
+	return held
 }
 
 // Request contains only identifiers and authorized scopes, never credentials.
@@ -143,6 +203,12 @@ type BindingConfig struct {
 	Secrets    map[string]SecretSource `json:"secrets,omitempty"`
 	Parameters map[string]string       `json:"parameters,omitempty"`
 	Scopes     []string                `json:"scopes,omitempty"`
+	// Placeholder is a non-secret string the workload holds in place of the real
+	// credential. It selects a candidate binding and authorizes nothing.
+	Placeholder string `json:"placeholder,omitempty"`
+	// Headers are fixed non-secret request headers sent with this credential,
+	// such as an account ID. The caller's values for them are dropped.
+	Headers map[string]string `json:"headers,omitempty"`
 	// StateFile contains the complete rotating OAuth token pair. Its parent must
 	// be private and writable. Every writer must use the adjacent .lock file.
 	StateFile string        `json:"state_file,omitempty"`
@@ -201,7 +267,9 @@ func validValue(s string, max int) bool {
 	}
 	return true
 }
-func validHeader(s string) bool {
+
+// ValidHeader reports whether an administrator may set this request header.
+func ValidHeader(s string) bool {
 	if s == "" || strings.EqualFold(s, "Host") || strings.EqualFold(s, "Content-Length") || strings.EqualFold(s, "Connection") || strings.EqualFold(s, "Proxy-Authorization") || strings.EqualFold(s, "Transfer-Encoding") {
 		return false
 	}

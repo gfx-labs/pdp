@@ -15,7 +15,8 @@ default allow := false
 allow if {
 	input.identity.auth_method == "unix"
 	input.identity.uid in allowed_uids
-	input.provider == "github"
+	input.destination.host == "api.github.com"
+	input.destination.port == 443
 	input.binding == "github-local"
 }
 
