@@ -15,7 +15,6 @@ import (
 	"github.com/gfx-labs/pdp/pkg/config"
 	"github.com/gfx-labs/pdp/pkg/gateway"
 	"github.com/gfx-labs/pdp/pkg/policy"
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 
 type combinedAuth struct {
@@ -44,24 +43,9 @@ func validateTransport(c config.Config) error {
 	if err != nil || mode == 0 || mode & ^uint64(0770) != 0 || mode&0007 != 0 {
 		return errors.New("socket_mode must be a private octal mode such as 0600 or 0660")
 	}
-	if c.Transport.UnixSocket != "" {
-		if _, err := auth.NewUnix(c.Identities); err != nil {
-			return err
-		}
-	}
 	if s := c.Transport.SPIFFE; s != nil {
-		if s.Address == "" || !strings.HasPrefix(s.WorkloadAPI, "unix:///") || len(s.Principals) == 0 {
+		if s.Address == "" || !strings.HasPrefix(s.WorkloadAPI, "unix:///") {
 			return errors.New("invalid SPIFFE transport")
-		}
-		for id, p := range s.Principals {
-			if _, err := spiffeid.FromString(id); err != nil || p == "" || len(p) > 256 {
-				return errors.New("invalid SPIFFE identity binding")
-			}
-			for _, ch := range p {
-				if ch < 0x21 || ch > 0x7e {
-					return errors.New("invalid SPIFFE principal")
-				}
-			}
 		}
 	}
 	return nil
@@ -72,7 +56,7 @@ func snapshot(l *config.Loaded, a auth.Authenticator) (*gateway.Snapshot, error)
 	for _, r := range l.Config.Routes {
 		routes = append(routes, gateway.Route{Provider: r.Provider, Binding: r.Binding, UpstreamURL: r.UpstreamURL, Scopes: r.Scopes, REST: l.REST[r.Schema], GraphQL: l.GraphQL[r.Schema]})
 	}
-	return gateway.NewSnapshot(gateway.SnapshotConfig{Version: l.Config.Revision, Authenticator: a, Routes: routes, Policy: l.Policy, Credentials: l.Credentials, PrincipalTasks: l.Config.PrincipalTasks})
+	return gateway.NewSnapshot(gateway.SnapshotConfig{Version: l.Config.Revision, Authenticator: a, Routes: routes, Policy: l.Policy, Credentials: l.Credentials})
 }
 
 func gatewayOptions(l *config.Loaded) gateway.Options {
@@ -83,7 +67,7 @@ func gatewayOptions(l *config.Loaded) gateway.Options {
 func validateCommand(args []string, out, errout io.Writer) error {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.SetOutput(errout)
-	path := fs.String("config", "pdp.yaml", "administrator configuration file")
+	path := fs.String("config", "pdp.json", "administrator configuration file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -119,7 +103,7 @@ func validateCommand(args []string, out, errout io.Writer) error {
 func explainCommand(args []string, out, errout io.Writer) error {
 	fs := flag.NewFlagSet("explain", flag.ContinueOnError)
 	fs.SetOutput(errout)
-	path := fs.String("config", "pdp.yaml", "administrator configuration file")
+	path := fs.String("config", "pdp.json", "administrator configuration file")
 	inputPath := fs.String("input", "", "trusted pdp.authz/v1 input JSON file")
 	if err := fs.Parse(args); err != nil {
 		return err

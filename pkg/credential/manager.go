@@ -99,7 +99,7 @@ func New(cfg Config) (*Manager, error) {
 	}
 	m := &Manager{cfg: cfg, programs: make(map[string]*starlark.Program), sem: make(chan struct{}, l.MaxConcurrent), cache: make(map[string]Result), calls: make(map[string]*flight), poisoned: make(map[string]bool)}
 	for name, p := range cfg.Providers {
-		if !validValue(name, 256) || len(p.Script) == 0 || len(p.Script) > l.MaxScriptBytes {
+		if !validValue(name, 256) || p.ScriptFile != "" || len(p.Script) == 0 || len(p.Script) > l.MaxScriptBytes {
 			return nil, failure(CodeInvalid)
 		}
 		for alias, endpoint := range p.Endpoints {

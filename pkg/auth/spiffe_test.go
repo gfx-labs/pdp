@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -101,7 +100,7 @@ func responseFor(ca certificateAuthority, svid *x509svid.SVID, key []byte) *work
 }
 
 // This exercises our real Workload API source and TLS listener, including source
-// rotation and principal-map reload, rather than injecting a fake TLS state.
+// rotation, rather than injecting a fake TLS state.
 func TestSPIFFERotation(t *testing.T) {
 	ca := testCA(t, 1)
 	serverSVID, key := ca.issue(t, "spiffe://example.test/pdp", 11)
@@ -118,20 +117,18 @@ func TestSPIFFERotation(t *testing.T) {
 	t.Cleanup(grpcServer.Stop)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	source, err := NewSPIFFE(ctx, "unix://"+socket, map[string]string{clientSVID.ID.String(): "alice"})
+	source, err := NewSPIFFE(ctx, "unix://"+socket)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { source.Close() })
-	var current atomic.Pointer[SPIFFE]
-	current.Store(source)
 	httpServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		identity, err := current.Load().Authenticate(r)
+		identity, err := source.Authenticate(r)
 		if err != nil {
 			w.WriteHeader(401)
 			return
 		}
-		io.WriteString(w, identity.Principal)
+		io.WriteString(w, identity.ID())
 	}), ErrorLog: log.New(io.Discard, "", 0)}
 	tcp, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -160,9 +157,9 @@ func TestSPIFFERotation(t *testing.T) {
 		}
 		return r, string(data)
 	}
-	first, principal := get()
-	if first.StatusCode != 200 || principal != "alice" || first.TLS.PeerCertificates[0].SerialNumber.Int64() != 11 {
-		t.Fatalf("initial SPIFFE identity not authenticated: %d %s", first.StatusCode, principal)
+	first, id := get()
+	if first.StatusCode != 200 || id != clientSVID.ID.String() || first.TLS.PeerCertificates[0].SerialNumber.Int64() != 11 {
+		t.Fatalf("initial SPIFFE identity not authenticated: %d %s", first.StatusCode, id)
 	}
 	updated := source.source.Updated()
 	rotated, rotatedKey := ca.issue(t, serverSVID.ID.String(), 12)
@@ -172,27 +169,20 @@ func TestSPIFFERotation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Workload API rotation was not consumed")
 	}
-	second, principal := get()
-	if second.StatusCode != 200 || principal != "alice" || second.TLS.PeerCertificates[0].SerialNumber.Int64() != 12 {
+	second, id := get()
+	if second.StatusCode != 200 || id != clientSVID.ID.String() || second.TLS.PeerCertificates[0].SerialNumber.Int64() != 12 {
 		t.Fatal("new TLS handshake did not use rotated SVID")
 	}
-	mapping, err := source.WithPrincipals(map[string]string{clientSVID.ID.String(): "bob"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	current.Store(mapping)
-	_, principal = get()
-	if principal != "bob" {
-		t.Fatal("request retained listener's old principal map")
-	}
-	other, _ := ca.issue(t, "spiffe://example.test/unbound", 22)
+	// A second trusted workload is reported as itself, so policy can tell them apart.
+	other, _ := ca.issue(t, "spiffe://example.test/other", 22)
 	response, err := makeClient(other).Get(endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
+	data, err := io.ReadAll(response.Body)
 	response.Body.Close()
-	if response.StatusCode != 401 {
-		t.Fatal("unbound trusted identity accepted")
+	if err != nil || response.StatusCode != 200 || string(data) != other.ID.String() {
+		t.Fatalf("second trusted identity misreported: %d %s", response.StatusCode, data)
 	}
 	forgedCA := testCA(t, 2)
 	forged, _ := forgedCA.issue(t, clientSVID.ID.String(), 31)

@@ -8,15 +8,24 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 var ErrUnauthenticated = errors.New("authentication required")
 
+// Identity holds only verified facts. Policy decides what an identity may do.
 type Identity struct {
-	Principal string
-	Method    string
-	UID       uint32
-	SPIFFEID  string
+	Method   string
+	UID      uint32
+	SPIFFEID string
+}
+
+// ID is the SPIFFE ID, or "uid:<n>" for a Unix peer.
+func (i Identity) ID() string {
+	if i.Method == "spiffe" {
+		return i.SPIFFEID
+	}
+	return "uid:" + strconv.FormatUint(uint64(i.UID), 10)
 }
 
 type Authenticator interface {
@@ -29,35 +38,12 @@ type peerIdentity struct {
 	valid bool
 }
 
-// Unix maps kernel-authenticated UIDs, not caller-controlled headers, to principals.
-// Processes sharing a UID share this authority. PID and systemd unit are not identities.
-type Unix struct{ principals map[uint32]string }
+// Unix reports the kernel-authenticated peer UID, never caller-controlled headers.
+// Every connecting UID reaches policy, which must deny the ones it does not name.
+// Processes sharing a UID share an identity. PID and systemd unit are not identities.
+type Unix struct{}
 
-func NewUnix(principals map[uint32]string) (*Unix, error) {
-	if len(principals) == 0 {
-		return nil, errors.New("at least one UID binding is required")
-	}
-	u := &Unix{principals: make(map[uint32]string, len(principals))}
-	for uid, p := range principals {
-		if !validPrincipal(p) {
-			return nil, errors.New("invalid principal binding")
-		}
-		u.principals[uid] = p
-	}
-	return u, nil
-}
-
-func validPrincipal(p string) bool {
-	if len(p) == 0 || len(p) > 256 {
-		return false
-	}
-	for _, c := range p {
-		if c < 0x21 || c > 0x7e {
-			return false
-		}
-	}
-	return true
-}
+func NewUnix() *Unix { return &Unix{} }
 
 // ConnContext must be installed on the HTTP server accepting the Unix listener.
 func (u *Unix) ConnContext(ctx context.Context, c net.Conn) context.Context {
@@ -74,11 +60,7 @@ func (u *Unix) Authenticate(r *http.Request) (Identity, error) {
 	if !ok || !peer.valid {
 		return Identity{}, ErrUnauthenticated
 	}
-	p, ok := u.principals[peer.uid]
-	if !ok {
-		return Identity{}, ErrUnauthenticated
-	}
-	return Identity{Principal: p, Method: "unix", UID: peer.uid}, nil
+	return Identity{Method: "unix", UID: peer.uid}, nil
 }
 
 // ListenUnix never removes an existing path. Its parent must be administrator-owned.

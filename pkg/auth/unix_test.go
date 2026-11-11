@@ -24,19 +24,14 @@ func TestUnixPeerBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bindings := map[uint32]string{uint32(os.Getuid()): "local"}
-	authn, err := NewUnix(bindings)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bindings[uint32(os.Getuid())] = "forged"
+	authn := NewUnix()
 	server := &http.Server{ConnContext: ConnContext, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity, err := authn.Authenticate(r)
 		if err != nil {
 			w.WriteHeader(401)
 			return
 		}
-		fmt.Fprintf(w, "%s:%d", identity.Principal, identity.UID)
+		fmt.Fprintf(w, "%s %s", identity.Method, identity.ID())
 	})}
 	go server.Serve(listener)
 	t.Cleanup(func() { server.Close() })
@@ -60,7 +55,7 @@ func TestUnixPeerBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(body) != fmt.Sprintf("local:%d", os.Getuid()) {
+	if string(body) != fmt.Sprintf("unix uid:%d", os.Getuid()) {
 		t.Fatalf("peer UID not kernel bound: %s", body)
 	}
 	info, err := os.Stat(socket)

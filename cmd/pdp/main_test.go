@@ -24,7 +24,6 @@ import (
 
 	"github.com/gfx-labs/pdp/pkg/config"
 	"github.com/gfx-labs/pdp/pkg/credential"
-	"github.com/gfx-labs/pdp/pkg/policy"
 	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
@@ -95,6 +94,7 @@ func TestCLIProcess(t *testing.T) {
 // Owns CLI transport/lifecycle integration, not the external provider's API.
 // It proves authorization precedes credentials and live reload revokes a warm
 // cache on the actual Unix server, including caller-forged identity headers.
+// The policy is a real Rego file, and revocation rewrites that file.
 func TestCLISocketReload(t *testing.T) {
 	for _, activated := range []bool{false, true} {
 		t.Run(fmt.Sprintf("activated=%t", activated), func(t *testing.T) {
@@ -122,11 +122,20 @@ func TestCLISocketReload(t *testing.T) {
 			if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Certificate().Raw}), 0600); err != nil {
 				t.Fatal(err)
 			}
+			policyPath := filepath.Join(dir, "policy.rego")
+			writePolicy := func(uid int) {
+				t.Helper()
+				source := fmt.Sprintf("package pdp.authz\n\nimport rego.v1\n\ndefault allow := false\n\nallow if {\n\tinput.identity.auth_method == \"unix\"\n\tinput.identity.uid == %d\n\tinput.provider == \"github\"\n\tinput.binding == \"local\"\n}\n", uid)
+				if err := os.WriteFile(policyPath, []byte(source), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writePolicy(os.Getuid())
 			cfg := config.Config{Version: config.Version, Revision: "initial", CAFile: ca,
-				Transport: config.Transport{UnixSocket: socket, SocketMode: "0600"}, Identities: map[uint32]string{uint32(os.Getuid()): "worker"},
+				Transport:   config.Transport{UnixSocket: socket, SocketMode: "0600"},
 				Routes:      []config.Route{{Provider: "github", Binding: "local", UpstreamURL: upstream.URL}},
 				Credentials: credential.Config{Providers: map[string]credential.ProviderConfig{"github": {Script: "def acquire(request):\n    return static(secret(\"token\"))\n"}}, Bindings: map[string]credential.BindingConfig{"local": {Provider: "github", Secrets: map[string]credential.SecretSource{"token": {File: secret}}}}},
-				Policy:      policy.Config{Grants: []policy.Grant{{ID: "full", Mode: policy.Full, Scope: policy.Scope{Identities: []string{"worker"}, Providers: []string{"github"}, Bindings: []string{"local"}}}}}}
+				Policy:      config.Policy{Modules: []string{"policy.rego"}}}
 			path := filepath.Join(dir, "pdp.json")
 			writeConfig := func() {
 				t.Helper()
@@ -269,8 +278,9 @@ func TestCLISocketReload(t *testing.T) {
 			cmd.Process.Signal(syscall.SIGHUP)
 			waitEvent("reload_rejected")
 			request(200)
+			// Revocation is a policy change: the Rego no longer names this UID.
 			cfg.Revision = "revoked"
-			cfg.Identities[uint32(os.Getuid())] = "ungranted"
+			writePolicy(os.Getuid() + 1)
 			writeConfig()
 			cmd.Process.Signal(syscall.SIGHUP)
 			ack := waitEvent("reload_applied")

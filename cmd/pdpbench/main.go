@@ -30,7 +30,6 @@ import (
 
 	"github.com/gfx-labs/pdp/pkg/config"
 	"github.com/gfx-labs/pdp/pkg/credential"
-	"github.com/gfx-labs/pdp/pkg/policy"
 )
 
 type usage struct {
@@ -153,10 +152,14 @@ func run() error {
 		Providers: map[string]credential.ProviderConfig{"github": {Script: "def acquire(request):\n    return oauth_client_credentials(endpoint=\"token\", client_id=\"benchmark\", client_secret=secret(\"client_secret\"))\n", Endpoints: map[string]string{"token": upstream.URL + "/oauth"}}},
 		Bindings:  map[string]credential.BindingConfig{"benchmark": {Provider: "github", Secrets: map[string]credential.SecretSource{"client_secret": {File: secret}}}},
 	}
+	authz := fmt.Sprintf("package pdp.authz\n\nimport rego.v1\n\ndefault allow := false\n\nallow if {\n\tinput.identity.auth_method == \"unix\"\n\tinput.identity.uid == %d\n\tinput.provider == \"github\"\n\tinput.binding == \"benchmark\"\n}\n", os.Getuid())
+	if err := os.WriteFile(filepath.Join(dir, "policy.rego"), []byte(authz), 0600); err != nil {
+		return err
+	}
 	c := config.Config{Version: config.Version, Revision: "benchmark-v1", CAFile: ca,
-		Transport: config.Transport{UnixSocket: socket, SocketMode: "0600"}, Identities: map[uint32]string{uint32(os.Getuid()): "local:benchmark"},
-		Routes: []config.Route{{Provider: "github", Binding: "benchmark", UpstreamURL: upstream.URL}}, Credentials: credentials,
-		Policy: policy.Config{Revision: "benchmark-v1", Grants: []policy.Grant{{ID: "benchmark-full", Mode: policy.Full, Scope: policy.Scope{Identities: []string{"local:benchmark"}, Providers: []string{"github"}, Bindings: []string{"benchmark"}}}}},
+		Transport: config.Transport{UnixSocket: socket, SocketMode: "0600"},
+		Routes:    []config.Route{{Provider: "github", Binding: "benchmark", UpstreamURL: upstream.URL}}, Credentials: credentials,
+		Policy: config.Policy{Modules: []string{"policy.rego"}},
 	}
 	encoded, err := json.Marshal(c)
 	if err != nil {

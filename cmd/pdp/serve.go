@@ -25,27 +25,19 @@ import (
 func runtimeAuth(c config.Config, source *auth.SPIFFE) (auth.Authenticator, error) {
 	var a combinedAuth
 	if c.Transport.UnixSocket != "" {
-		u, err := auth.NewUnix(c.Identities)
-		if err != nil {
-			return nil, err
-		}
-		a.unix = u
+		a.unix = auth.NewUnix()
 	}
 	if c.Transport.SPIFFE != nil {
 		if source == nil {
 			return nil, errors.New("SPIFFE source is unavailable")
 		}
-		s, err := source.WithPrincipals(c.Transport.SPIFFE.Principals)
-		if err != nil {
-			return nil, err
-		}
-		a.spiffe = s
+		a.spiffe = source
 	}
 	return a, nil
 }
 
-// Transport changes require restart. Principal mappings belong to snapshots and
-// may change without replacing listeners, TLS sources or open connections.
+// Transport changes require restart. Which identities are allowed is policy, so
+// it changes with a snapshot without replacing listeners or open connections.
 func sameRuntime(a, b config.Config) bool {
 	if a.Transport.UnixSocket != b.Transport.UnixSocket || a.Transport.SocketMode != b.Transport.SocketMode || a.CAFile != b.CAFile || !reflect.DeepEqual(a.Limits, b.Limits) {
 		return false
@@ -60,7 +52,7 @@ func sameRuntime(a, b config.Config) bool {
 func serveCommand(args []string, out, errout io.Writer) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(errout)
-	path := fs.String("config", "pdp.yaml", "administrator configuration file")
+	path := fs.String("config", "pdp.json", "administrator configuration file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -83,7 +75,7 @@ func serveCommand(args []string, out, errout io.Writer) error {
 	var source *auth.SPIFFE
 	if s := l.Config.Transport.SPIFFE; s != nil {
 		initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		source, err = auth.NewSPIFFE(initCtx, s.WorkloadAPI, s.Principals)
+		source, err = auth.NewSPIFFE(initCtx, s.WorkloadAPI)
 		cancel()
 		if err != nil {
 			return err
@@ -195,7 +187,7 @@ func serveCommand(args []string, out, errout io.Writer) error {
 			a, err := runtimeAuth(next.Config, source)
 			if err != nil {
 				next.Close()
-				logger.Print(`{"event":"reload_rejected","reason":"invalid_identity_mapping"}`)
+				logger.Print(`{"event":"reload_rejected","reason":"spiffe_source_unavailable"}`)
 				continue
 			}
 			s, err := snapshot(next, a)

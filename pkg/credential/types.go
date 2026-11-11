@@ -127,8 +127,9 @@ type SecretSource struct {
 // ProviderConfig and scripts are administrator configuration, not user policy.
 // Endpoints are exact HTTPS URLs. Scripts cannot choose hosts, paths or redirects.
 type ProviderConfig struct {
-	Script    string            `json:"script"`
-	Endpoints map[string]string `json:"endpoints,omitempty"`
+	Script     string            `json:"script,omitempty"`
+	ScriptFile string            `json:"script_file,omitempty"`
+	Endpoints  map[string]string `json:"endpoints,omitempty"`
 }
 
 type GitHubConfig struct {
