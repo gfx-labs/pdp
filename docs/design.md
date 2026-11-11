@@ -1,111 +1,119 @@
-# PDP design and acceptance contract
+# PDP design
 
-PDP is a standalone identity-aware credential gateway, not a Jobshop integration commitment. This document records the implementation requirements, not evidence that acceptance has passed. See the acceptance report for measured results and external gaps.
+PDP is a standalone identity-aware credential gateway, not a Jobshop integration commitment. This document describes the design the code implements. It is not evidence that acceptance has passed. See [acceptance.md](acceptance.md) for what has and has not been run.
 
-## Purpose and trust boundaries
+## Purpose and trust split
 
-A workload calls GitHub REST or Linear GraphQL without receiving upstream credentials. The Go gateway authenticates callers, normalizes operations, evaluates embedded OPA, obtains a credential through a bounded administrator-owned Starlark adapter, and forwards only the approved request. Schemas describe operations but confer no permissions. SPIRE runs separately when selected.
+A workload calls GitHub REST or Linear GraphQL through PDP without receiving the provider credential. Three parts divide the work, and each trusts only what the previous part established:
 
-Supported authentication modes feed one policy decision path:
+| Part | Owns | Does not do |
+| --- | --- | --- |
+| Go | Authenticating the caller, parsing and normalizing the request, building `input`, enforcing limits, forwarding the approved request | Decide who may do what. Map identities to principals. Classify operations as safe or unsafe. |
+| Rego | The authorization decision, from `input` and optional OPA data | Obtain credentials, make network calls, or see headers |
+| Starlark | Obtaining a credential for the binding, after `allow` | See the request, the identity or the policy |
 
-- Unix-domain HTTP with Linux `SO_PEERCRED` verified by the kernel and administrator UID-to-principal mapping. No identity daemon or schema is needed for a minimal full-access deployment. Shared UIDs share identity.
-- systemd deployment with explicit socket ownership, permissions and socket activation. Do not infer session isolation from PID, unit names, cgroups or caller labels.
-- Optional SPIFFE mTLS using the maintained Go SPIFFE Workload API library. Verify peer identity and handle certificate rotation. SPIFFE is not an upstream credential replacement.
+Administrators control routes, upstream origins, schemas, policy modules and data, adapters, secret references and credential bindings. Caller headers cannot establish identity, binding or destination.
 
-Only administrators control routes, upstream origins, identity maps, credential bindings, schema versions, policies, adapters, secret references and relationship snapshots. Caller headers cannot establish identity, binding, destination or resource grants.
+Schemas describe operations but confer no permissions. Policy decides.
+
+## Authentication
+
+Go authenticates and reports verified facts. It holds no allowlist and does not map identities to principals.
+
+- **Unix socket.** Linux `SO_PEERCRED` supplies the kernel UID. `input.identity` is `{id: "uid:<n>", auth_method: "unix", uid: <n>}`. No identity daemon or schema is needed for a minimal deployment. A shared UID is a shared identity.
+- **SPIFFE mTLS (optional).** The maintained go-spiffe Workload API source supplies the SVID and trust bundle. Go checks the peer certificate against the current bundle on every request. `input.identity` is `{id: <spiffe id>, auth_method: "spiffe", spiffe_id: <spiffe id>}`. SPIFFE is not a replacement for the upstream credential.
+- **systemd.** Socket activation hands PDP one Unix socket with administrator-set ownership and mode. PID, unit names and cgroups are not identities.
+
+Every connecting UID and every workload the bundle verifies reaches policy, so a caller that policy does not name gets `403` from default deny. Socket file permissions and the trust bundle stay the outer boundary. An unauthenticatable connection (unreadable peer UID, unverified certificate) gets `401`.
 
 ## Request enforcement
 
-1. Authenticate the connection using verified peer credentials.
-2. Resolve an explicit provider route and credential binding.
-3. Bound headers and body. Reject unsupported encodings, ambiguous paths/query/body forms and unsupported protocols.
-4. Normalize and validate against the pinned schema when required by the selected restricted grant.
-5. Evaluate the complete normalized request using an immutable versioned authorization snapshot.
-6. Only after allow, acquire a scoped credential from its cache or adapter.
-7. Remove local routing prefix, caller authorization and hop-by-hop headers. Inject the credential and forward the approved provider path/payload.
-8. Return the bounded provider response after removing sensitive headers.
-9. Emit a sanitized decision and outcome event with snapshot/schema/grant revision metadata.
+1. Authenticate the connection.
+2. Select the provider route from the path. Routes are `/upstreams/github/...` and `/upstreams/linear/graphql`.
+3. Bound headers and body. Reject unsupported encodings, ambiguous paths, query and body forms, and unsupported protocols.
+4. Normalize. With a pinned schema the request is validated against it and mapped to operation IDs, path parameters, typed query values and, for GraphQL, field occurrences. Without a schema Go produces only a coarse operation (`untyped:http:<METHOD>` or `untyped:graphql:<type>`).
+5. Build `input` and evaluate `data.pdp.authz` in an immutable policy snapshot. Only a boolean `allow` of `true` authorizes. Anything else denies.
+6. Only after `allow`, acquire a scoped credential from the cache or the Starlark adapter.
+7. Build a fresh upstream request. Drop the local routing prefix, caller authorization, cookies and hop-by-hop headers. Apply the credential and forward the approved path and payload.
+8. Return the bounded response with locally reconstructed headers. Reject responses that reflect the credential.
+9. Emit an audit event with the snapshot, policy revision, schema digest, matched rules and outcome.
 
-Routes are `/upstreams/github/...` and `/upstreams/linear/graphql`. Default origins are `https://api.github.com` and `https://api.linear.app`; the latter route forwards `/graphql`. Origins come exclusively from administrator configuration. Refuse redirects. Do not retry mutating requests. Bound response bytes, concurrency and all connection/request deadlines. Reject streaming, upgrades, GraphQL subscriptions, batching and unsupported features rather than forwarding silently.
+The default upstreams are `https://api.github.com` and `https://api.linear.app/graphql`. Origins come only from administrator configuration. Redirects are refused. Mutating requests are not retried. Response bytes, concurrency and all deadlines are bounded. Streaming, upgrades, GraphQL subscriptions and batching are rejected, not forwarded.
 
-No credential-return endpoint, arbitrary caller URL, response-field filtering, transparent support for every GitHub CLI command, browser consent UI, multi-tenant admin platform or request-path schema introspection is in scope.
+Out of scope: a credential-return endpoint, arbitrary caller URLs, response-field filtering, support for every GitHub CLI command, a browser consent UI, a multi-tenant admin platform, request-path schema introspection.
 
-## Progressive permissions
+## Policy model
 
-Three supported deployment levels use the same authorization path:
+Rego is the only policy path. Administrators write modules in `package pdp.authz`:
 
-1. `full`: one identity and one binding, no schemas, custom Rego, relationships or task placeholders required. All supported bounded valid HTTP operations on that binding are allowed, including destructive/admin operations within the provider credential scope. This never grants other bindings, destinations, gateway administration or secret retrieval.
-2. `read` and `read_write`: built-in reviewed provider operation mappings and optional direct resource allowlists, without custom Rego or graph configuration. Unknown operations deny. Never classify from HTTP verbs or GraphQL query/mutation syntax alone. `read_write` excludes destructive/admin operations unless separately explicitly granted.
-3. Fine-grained restrictions: operation/argument constraints, custom Rego and optional relationship requirements on selected grants.
+```rego
+package pdp.authz
 
-Each grant's constraints are conjunctive. Direct grants do not require graph data. Explicit denies and mandatory deployment restrictions override every allow, including full grants. Diagnostics must expose overlapping broad grants, so a narrow grant is not mistaken for a restriction on an existing broad allow. An explanation command shows identity, binding, profile, effective direct resources and optional advanced constraints. Moving between levels preserves identity and API routing.
+import rego.v1
+
+default allow := false
+
+allow if { ... }
+
+matched_rules contains "name" if allow
+reasons contains "text" if not allow
+```
+
+`allow` is required and must be boolean. `reasons` and `matched_rules` are optional sets of strings that appear in `pdp explain` output, and `matched_rules` also appears in audit events. A missing, undefined, non-boolean or erroring result denies. The query runs with strict builtin errors. `http.send`, `net.lookup_ip_addr` and `opa.runtime` are removed and no network access is allowed. Optional OPA data comes from at most one JSON file and may not define `data.pdp.authz`.
+
+Go provides no grant, profile, mode, constraint, deny, mandatory restriction, relationship or reviewed-operation registry. A policy that needs one writes it. Examples in `examples/packs` show a UID allowlist, a repository allowlist, reviewed operation IDs and a GraphQL occurrence walk.
+
+What a policy author owns, because nothing else does:
+
+- **Identity.** Compare `input.identity` with the callers allowed. A policy that does not gets whatever it wrote, which can be every caller who reaches the socket.
+- **Schema pinning.** Compare `input.schema_digest` with the reviewed digest. A policy that omits it keeps allowing requests after a schema file changes. `pdp catalog` prints the digest and `pdp schema diff` compares two schemas.
+- **Provider and binding.** Compare `input.provider` and `input.binding`.
+- **Resources.** The GitHub repository is the exact `owner/repo` pair from `input.http.path_params`. A comment mutation's team ID is not proof of issue membership, so allow named issue UUIDs.
+- **Every occurrence.** For GraphQL, `input.graphql` has one entry per selected field occurrence with coordinate, path and arguments. Aliases, fragments, variables and fields behind `@skip` or `@include` all appear. Repeated occurrences are separate entries, never merged into a coordinate-keyed map.
+
+Parsed caller data stays untrusted even when structurally valid. Provider-state-dependent permissions need a trusted lookup, which PDP does not provide, so a policy cannot rely on them.
 
 ## Schema normalization
 
-OpenAPI import deliberately supports a documented narrow subset. Produce stable operation IDs, methods, path templates, parameter/body references and a machine-readable catalog. Deterministically match paths, normalize typed query values, validate bodies and fail import for unsupported security-relevant constructs. Do not claim complete OpenAPI compatibility.
+OpenAPI import supports a documented narrow subset. It produces stable operation IDs, methods, path templates, parameter and body references, and a machine-readable catalog. It matches paths deterministically, normalizes typed query values, validates bodies and fails import for unsupported security-relevant constructs. It does not claim full OpenAPI compatibility.
 
-GraphQL uses a pinned schema and a dedicated Go parser/validator if OPA alone cannot establish the required contract. Select `operationName`, validate operations, expand fragments, resolve aliases to actual schema coordinates, coerce variables and defaults, and conservatively authorize all selected fields including conditional selections. Reject batches, subscriptions and unresolved constructs. Every selected nested field must be considered. Preserve repeated field occurrences as a list containing coordinate, path and normalized arguments, never merge distinct calls into one coordinate-keyed arguments map.
+GraphQL uses a pinned schema and a dedicated Go parser and validator. It selects `operationName`, validates operations, expands fragments, resolves aliases to schema coordinates, coerces variables and defaults, and records all selected fields including conditional ones. It rejects batches, subscriptions and unresolved constructs.
 
-Record schema digests in decisions, generate catalog diffs on schema changes, fail validation on unknown operation references and never automatically grant new schema operations. Ship pinned real provider/schema inputs with provenance, not only toy schemas.
-
-REST or GraphQL validation does not establish resource authorization. Policies constrain repositories, issue IDs, teams and input fields as applicable. Provider-state-dependent permissions need an explicit trusted lookup or must deny. Initial GitHub access is read/comment in one designated repository. Initial Linear access is reads/comments in explicit approved issue scope. A comment mutation's team ID is not proof of issue membership. Use an issue allowlist until a trusted resource lookup exists.
-
-## Versioned authorization input
-
-The trusted envelope includes version, verified identity, provider, credential binding, schema digest, HTTP method/path and normalized operations. GraphQL field occurrences retain distinct paths and argument sets. Parsed caller data remains untrusted even when structurally valid. Evaluation errors, missing required data, unknown restricted operations and expired/unavailable policy deny.
-
-## Optional fixed relationships and revocation
-
-Use a small local relationship model, not a general graph engine or external service initially:
-
-- verified worker identity -> assigned task
-- task -> permitted GitHub repository or Linear issue
-- each permission is explicit, such as read or comment, with expiry
-
-Only administrator configuration or an authenticated controller supplies records. Caller task selections must be verified against assignment. Caller bodies, labels and schema information cannot establish relationships. Repository membership never implies administration.
-
-Load a versioned relationship snapshot atomically with route/schema/policy/adapter configuration. Include its revision in audit records. Avoid positive authorization caching. Every request checks current grants even when reusing a provider token. Required stale or unavailable relationship state fails closed, without imposing graph requirements on unrelated direct grants.
-
-After a new revision is acknowledged, every authorization beginning afterward uses that revision. Already authorized requests may finish within existing deadlines. This is a local snapshot boundary, not Zanzibar distributed consistency. Multi-replica acknowledgement must cover all serving replicas or stale replicas must stop accepting traffic. Removing grants does not revoke issued provider tokens or undo in-flight provider actions. Consider SpiceDB/OpenFGA behind a narrow interface only if a shared relationship service becomes necessary.
+Schema digests appear in `input.schema_digest`, decisions and audit events. `pdp schema diff` reports added, removed and changed operations. A new schema operation grants nothing, because policy must name it. See [pkg/schema/README.md](../pkg/schema/README.md).
 
 ## Credential engine
 
-Adapters are trusted administrator code, not policy or workload-supplied programs. Small host capabilities provide secret-reference access, opaque approved JWT signing, bounded HTTPS to configured destinations, bounded JSON/token parsing and typed credential results. Prefer opaque secret handles. If raw values enter trusted code, document the trust implication. Never include secret values in interpreter errors, debug output or HTTP failures.
+Adapters are trusted administrator code, not policy and not workload-supplied programs. Native helpers give them secret handles, opaque JWT signing, bounded HTTPS to configured endpoint aliases, bounded JSON and token parsing, and typed credential results. Policy never sees any of it.
 
-Go owns mounted/systemd credential loading, TLS validation, fixed destinations and redirect refusal, deadlines, instruction budgets, bounded inputs/results, concurrency, cache keys, expiry margins, single-flight refresh, invalidation and redaction. Cache keys include provider, binding and requested scope. Snapshot changes must not reuse credentials across changed adapter/secret/scope contexts. Starlark is not a hard memory sandbox. Untrusted adapters would require a separately resource-limited process.
+Go owns mounted and systemd credential loading, TLS validation, fixed destinations, redirect refusal, deadlines, step budgets, bounded inputs and results, concurrency, cache keys, expiry margins, single-flight refresh, invalidation and redaction. Cache keys include provider, binding and requested scope. A new snapshot gets a new cache. Starlark is not a hard memory sandbox. An untrusted adapter would need a separate resource-limited process.
 
-GitHub App support signs an App JWT through opaque key access and exchanges it for an installation token restricted to administrator repository IDs and permissions. A static mounted credential supports the vertical slice.
+Supported flows: a static mounted token, a GitHub App installation token limited to administrator repository IDs and permissions, Linear client credentials (app actor), and a pre-authorized Linear refresh-token installation. Linear actor and flow are explicit. Rotating refresh state is serialized and written atomically and durably before the access token counts as a success. See [pkg/credential/README.md](../pkg/credential/README.md).
 
-Shared OAuth primitives handle client credentials and refresh exchanges. Linear actor and flow must be explicit. Client credentials for an app actor are not interchangeable with a user-authorized installation, and must not silently replace an existing installation. Pre-authorized refresh state can seed the prototype without implementing browser consent. Rotating refreshes serialize, and replacement state must be atomically persisted durably before the access token is treated as successful. Restart must not lose a rotated refresh token.
+## Reload and revocation
+
+A reload builds a complete new snapshot (policy, schemas, routes, bindings, credential manager) and publishes it atomically. A request uses exactly one snapshot. After `reload_applied` for a revision, every authorization that begins afterward uses it. Requests already authorized may finish within their deadlines. There is no positive authorization cache, so a warm provider token cannot outlive a policy change.
+
+This is a local snapshot boundary. It does not revoke issued provider tokens or undo in-flight provider actions, and it gives no multi-replica consistency. Revocation across replicas needs an acknowledgement from each, or stale replicas must stop serving. Listener, limit and CA settings need a restart.
 
 ## Operational delivery
 
-Ship a usable CLI for configuration validation, Rego compilation, policy explanation, catalog generation/diff and local request exercise. Include minimal full-access and read-only examples first, plus read/write examples and documented exact profile contents. Configuration reload replaces immutable route/schema/policy/adapter/grant snapshots atomically. An in-flight request retains one consistent snapshot. Provide hardened systemd/socket units and mounted/systemd secret examples.
-
-Provide Kubernetes manifests and a Workload API/service-account attestation guide without applying them. Document trusted selector requirements and Jobshop sandbox mounts/environment without changing Jobshop. Actual UID/unit/cgroup selectors must be established before later per-session integration.
+The `pdp` CLI provides `serve`, `validate`, `explain`, `catalog`, `schema diff` and `request`. Configuration is JSON (`pdp.config/v2`) referencing `.rego`, schema and adapter files. Ready-to-edit packs in `examples/packs` cover Unix and SPIFFE callers, GitHub and Linear, and read or comment use. The `systemd` pack has service and socket units, and the `github-spiffe` pack has a Kubernetes manifest. Neither has been applied. See [deployment.md](deployment.md) and [configuration.md](configuration.md).
 
 ## Acceptance matrix
 
-Keep focused security regressions and real local socket/TLS integration checks. Use recorded real provider/schema inputs where feasible. Real writes require explicit approval for named disposable resources.
+Focused tests and the real CLI cover the local items. Real provider reads and writes, SPIRE and Kubernetes are not covered. See [acceptance.md](acceptance.md) for the current mapping.
 
-- Missing, untrusted and wrong identity deny; forged identity headers are ignored.
-- Binding selection cannot escape grants.
-- Unknown REST operations and GraphQL fields deny under restricted profiles.
-- Aliases, fragments, operation selection, variables/defaults and repeated selections cannot bypass authorization.
-- Encoded paths, duplicate parameters and body/content-type ambiguity cannot change the authorized operation.
-- Forbidden requests never reach the provider.
-- Redirects and caller URLs cannot exfiltrate credentials.
-- Concurrent requests do not cause refresh storms.
-- Expiry and failed refresh fail closed without cached credential leakage.
-- Rotated refresh state survives the required persistence/restart boundary.
-- Reload never mixes schema/policy/adapter/identity/grant versions.
-- Logs, errors and caller responses do not reveal provider credentials.
-- Gateway/caller certificate rotation works without replacing upstream tokens.
-- Full mode works without schema/task/graph files, and remains confined to its upstream/binding.
-- Read and read/write work without custom Rego or relationships; unknown operations deny.
-- Optional relationship requirements are mandatory only for their selected grants.
-- Assigned, unassigned, forged-context, expired and cross-task resource cases follow explicit permissions.
-- Revocation applies at the acknowledged revision boundary with a warm credential cache.
-- Audit identifies the schema and grant revisions used.
+- Default deny: an undefined, non-boolean or failing policy result denies, and a denied request never acquires a credential or reaches the provider.
+- A named UID is allowed and another UID is denied, over a real Unix socket.
+- A verified SPIFFE ID the policy does not name is denied. Rotation of the source SVID and bundle is exercised against a local Workload API server.
+- Forged identity headers are ignored.
+- Unknown REST operations and GraphQL fields are denied by the shipped policies.
+- Aliases, fragments, operation selection, variables and defaults, and repeated selections are separate occurrences.
+- Encoded paths, duplicate parameters and body and content-type ambiguity are rejected before policy.
+- Redirects and caller URLs cannot redirect a credential.
+- Concurrent requests share one acquisition. Expiry and failed refresh fail closed.
+- Rotated refresh state survives a process restart.
+- Reload swaps the whole snapshot. Rewriting the Rego file and sending `SIGHUP` revokes a warm credential cache.
+- Logs, errors and responses do not reveal provider credentials.
 
-Run gofmt, build, vet and race tests. Measure gateway idle/active RSS and CPU, authorized-request latency and credential-refresh latency. Measure SPIRE server and agent separately when running them. Never infer the combined deployment is lightweight from gateway measurements alone. Real provider reads, SPIRE deployment/certificate lifecycle and Kubernetes acceptance must be explicitly identified as externally blocked if the needed credentials or infrastructure are unavailable, not claimed passed by local tests.
+Real provider reads, SPIRE issuance and rotation, Kubernetes deployment and all-replica revocation are externally blocked until credentials and infrastructure exist. Local tests do not establish them. Real writes need explicit approval for named disposable resources.

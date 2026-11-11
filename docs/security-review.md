@@ -4,6 +4,18 @@ Date: November 9, 2026.
 
 Status: final local review completed at 09:55:49 UTC. No unresolved implementation-blocking finding remains in the reviewed scope. All eighteen tracked findings have owner fixes and executable evidence. This report is not deployment approval. The review baseline is `docs/design.md`.
 
+## Status of this record
+
+This is a dated record of a review of the earlier design, kept as history. The text below is unchanged except for this section. It describes grants, profiles, relationships, principal maps, YAML configuration and `docs/design.md` as they stood on November 9, 2026. Those names, files and paths no longer exist.
+
+The code has changed since. Rego written by administrators is now the only policy path, and Go only authenticates a Unix peer UID or a SPIFFE ID and normalizes requests. Findings by the code they concern:
+
+- **Removed code (grant engine, profiles, relationships, principal maps, YAML loader).** SR-01, SR-03, SR-04 (`pkg/policy/constraints.go`), SR-08, SR-15, SR-18 (profile and operation cross-validation, `pkg/config/profiles.go`), SR-09 (YAML numeric lexemes), SR-10 (`principal_tasks` and relationship selection), SR-12 (composite resource selectors in the built-in profiles). Their fixes and evidence no longer apply. An administrator's Rego now owns those properties.
+- **Rewritten code.** SR-02 (exact JSON numbers) and SR-11 (audit provenance) concern `pkg/policy` and the gateway audit event. Both were reimplemented for the direct-Rego engine, and the audit event now carries `matched_rules` in place of grant provenance. SR-16 (duration coercion) concerns the loader, which still converts durations on three typed paths and no longer has literal policy objects to corrupt. Current tests cover these properties. The reimplementations have not been reviewed independently.
+- **Code still present.** SR-05 (`pkg/schema/rest.go`), SR-06 (`pkg/credential/oauth.go`), SR-07 (gateway response handling), SR-13 (`pkg/schema/rest.go`), SR-14 (`pkg/auth/peer_linux.go`) and SR-17 (`cmd/pdp/serve.go`). These files still exist, and their tests pass in the current tree. The packages were not re-reviewed after the policy and identity changes, and the findings table is the evidence from November 9.
+
+**The direct-Rego engine and the identity change have not had an independent review.** That covers the `pkg/policy` evaluation path, the restricted builtin set, fail-closed handling of malformed results, and the move of identity mapping from Go into Rego. The change also makes a previously `401` case a `403`. Every local UID that can open the socket, and every workload in a trusted SPIFFE domain, now reaches policy. A policy author who forgets to compare `input.identity` or `input.schema_digest` gets the policy they wrote, and nothing else catches that. The acceptance trace below describes the earlier design and must not be read as evidence for the current one. For current evidence see [acceptance.md](acceptance.md).
+
 ## Scope and method
 
 The reviewer read `pkg/auth`, `pkg/gateway`, `pkg/policy`, `pkg/schema`, `pkg/credential`, `pkg/config`, their CLI callers and the deployment examples while separate owners implemented them. Findings were sent to the responsible owner and coordinator. The reviewer did not change worker-owned implementation. Independent probes used Go overlays outside this repository, including an immutable pre-fix source snapshot, without reverting shared files. No review scaffolding tests are shipped. Retained security regressions belong to the implementation owners and exercise PDP's own public authorization, transport and lifecycle boundaries.

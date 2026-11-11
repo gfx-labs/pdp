@@ -32,6 +32,8 @@ Check `err`, call `Close` when retiring the manager, and use `Validate(Request)`
 
 `Result` and `Manager` formatting is redacted. Results serialize only kind and expiry. `Apply` is deliberately the only operation that exports an authentication value. Never log applied headers. Reload with a newly validated manager and immutable route bindings. The gateway owns the retiring manager's lifecycle.
 
+In `pdp.json` the same structure sits under `credentials` as `providers` and `bindings`, with snake_case keys such as `linear_actor`, `state_file` and `systemd_credential`. A provider takes exactly one of `script` and `script_file`. The `pkg/config` loader reads `script_file` relative to the configuration file and passes its content to `New` as `Script`, so `New` itself rejects `ScriptFile`. The files in `adapters/` are the same adapters the packs under `examples/packs` ship as `adapter.star`: `static.star` in `minimal`, `github-read`, `github-spiffe` and `systemd`, `github_app.star` in `github-comment`, `linear_client_credentials.star` in `linear-read` and `linear_refresh.star` in `linear-comment`.
+
 ## Adapter capabilities
 
 An adapter defines `acquire(request)` and returns a native credential result. `request` is an immutable dictionary with `provider`, `binding`, and a canonical tuple of `scopes`. No module loading, environment access, file APIs or general HTTP API is exposed.
