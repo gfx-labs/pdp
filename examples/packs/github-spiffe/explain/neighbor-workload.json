@@ -1,0 +1,17 @@
+{
+  "version": "pdp.authz/v1",
+  "identity": {
+    "id": "spiffe://example.org/workers/neighbor",
+    "auth_method": "spiffe",
+    "spiffe_id": "spiffe://example.org/workers/neighbor"
+  },
+  "provider": "github",
+  "binding": "github-worker",
+  "schema_digest": "sha256:e5144f87c069a92de5d96588a6b4b4c8614f1f88c9f52b012a7dd63704a0ca89",
+  "http": {
+    "method": "GET",
+    "path": "/repos/APPROVED_OWNER/APPROVED_REPOSITORY",
+    "path_params": {"owner": "APPROVED_OWNER", "repo": "APPROVED_REPOSITORY"}
+  },
+  "operations": [{"id": "repos/get"}]
+}

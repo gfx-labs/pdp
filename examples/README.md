@@ -1,54 +1,65 @@
-# Provider use cases
+# Packs
 
-These walkthroughs pair the checked-in configurations with caller requests. Run commands from the repository root. No caller command needs a GitHub token, Linear token, App private key or OAuth client secret.
+A pack is a complete, runnable configuration in one directory. Copy it, edit the marked values, serve it.
 
-**Rego is the policy; YAML specifies its data.** Every `policy:` section is loaded into immutable `data.pdp.config` for [the embedded authorization rules](../pkg/policy/base.rego). Go validates configuration and normalizes requests, not grant decisions. Read the [YAML-to-Rego walkthrough](policy.md) for the actual rule path, input contract and a runnable custom Rego denial. Existing YAML fields and provider request bodies did not change in the migration.
-
-| Use case | Walkthrough | Configuration |
+| Pack | Caller | What the policy allows |
 | --- | --- | --- |
-| Read one GitHub repository and its issues | [GitHub](github.md#read-a-repository-and-issue) | [github-read.yaml](github-read.yaml) |
-| Comment on an approved GitHub repository's issue | [GitHub](github.md#allow-approved-issue-comments) | [github-read-write.yaml](github-read-write.yaml) |
-| Override an allowed GitHub comment with a custom Rego denial | [Policy walkthrough](policy.md#run-a-custom-rego-denial) | [github-comment-freeze.yaml](github-comment-freeze.yaml) |
-| Read approved Linear issues | [Linear](linear.md#read-an-approved-issue) | [linear-read.yaml](linear-read.yaml) |
-| Comment on approved Linear issues | [Linear](linear.md#allow-comments-on-approved-issues) | [linear-read-write.yaml](linear-read-write.yaml) |
-| Reuse an existing Linear OAuth installation | [Linear](linear.md#use-an-existing-oauth-installation) | [linear-oauth.yaml](linear-oauth.yaml) |
-| Shield credentials without schema restrictions | [GitHub](github.md#credential-shielding-with-full-access), [Linear](linear.md#use-an-existing-oauth-installation) | [github-app.yaml](github-app.yaml), [linear-oauth.yaml](linear-oauth.yaml) |
+| [minimal](packs/minimal/README.md) | Unix UID | Everything the GitHub credential can do. No schema. |
+| [github-read](packs/github-read/README.md) | Unix UID | Read one repository, its issues and issue comments. |
+| [github-comment](packs/github-comment/README.md) | Unix UID | The reads above, plus creating issue comments in that repository. GitHub App credential. |
+| [linear-read](packs/linear-read/README.md) | Unix UID | Read named issues. Client-credentials app actor. |
+| [linear-comment](packs/linear-comment/README.md) | Unix UID | Read named issues and comment on them. Existing OAuth installation with refresh. |
+| [github-spiffe](packs/github-spiffe/README.md) | SPIFFE ID | Read one repository. Kubernetes manifest included. |
+| [systemd](packs/systemd/README.md) | Unix UID | Same policy as minimal, with service and socket units and a systemd credential. |
 
-## Check the templates offline
+## What is in a pack
+
+| File | Purpose |
+| --- | --- |
+| `policy.rego` | The authorization policy. Allowed callers, repositories or issues are sets at the top of the file. |
+| `pdp.json` | Runtime wiring: socket or SPIFFE listener, route, schema file, credential binding, secret paths. |
+| `adapter.star` | Starlark that obtains the provider credential after the policy allows. |
+| `github-rest.json`, `linear.graphql` | The pinned request schema. Its digest is checked in `policy.rego`. |
+| `requests/` | Request bodies for `pdp request`. |
+| `explain/` | Trusted inputs for `pdp explain`, to check the policy without serving. |
+
+All paths in `pdp.json` except secrets and the socket are relative to the pack, so the directory can be moved as a unit.
+
+## Use a pack
+
+Run from the repository root.
 
 ```sh
 make build
-bin/pdp validate --config examples/github-read.yaml
-bin/pdp validate --config examples/github-read-write.yaml
-bin/pdp validate --config examples/github-comment-freeze.yaml
-bin/pdp validate --config examples/linear-read.yaml
-bin/pdp validate --config examples/linear-read-write.yaml
-bin/pdp validate --config examples/github-app.yaml
-bin/pdp validate --config examples/linear-oauth.yaml
-bin/pdp validate --config examples/minimal.yaml
-bin/pdp validate --config examples/kubernetes/pdp.yaml
-CREDENTIALS_DIRECTORY=/run/credentials/pdp.service \
-  bin/pdp validate --config examples/systemd/pdp.yaml
+bin/pdp validate --config examples/packs/github-read/pdp.json
+bin/pdp explain --config examples/packs/github-read/pdp.json \
+  --input examples/packs/github-read/explain/read-issue.json
 ```
 
-Validation imports schemas and compiles authorization and adapters. It does not read provider credentials, obtain tokens or contact either provider. Placeholders are accepted for offline review, not evidence that an account is configured.
+Then:
 
-`explain-full.json` is an administrator-supplied normalized input, not a caller authentication mechanism. The request JSON files remain ordinary provider payloads. Neither includes grants, denials or `_pdp` facts: the engine constructs trusted facts and Rego determines the outcome.
+1. Copy the pack to an administrator-owned directory such as `/etc/pdp`. Workloads must not be able to write it.
+2. In `policy.rego`, replace the values under "Edit these": the caller UID or SPIFFE ID, and the repository or issue IDs.
+3. In `pdp.json`, set the secret file paths and any `REPLACE_` values.
+4. Run PDP under its own account. Only that account may read the secrets. Give callers access to the socket through a group, with `socket_mode` `0660`. The socket's parent directory must be owned by root or the daemon and not writable by callers.
+5. `bin/pdp validate --config /etc/pdp/pdp.json`, then `bin/pdp serve --config /etc/pdp/pdp.json`.
 
-## Set up the identity boundary
+To change policy on a running daemon, edit `policy.rego`, set a new `revision` in `pdp.json` and send `SIGHUP`.
 
-1. Run PDP under a daemon UID distinct from the workload UID. Only the daemon can read provider secrets and OAuth refresh state.
-2. Map the actual workload UID to `local-worker` in `identities`. Processes sharing that UID share its permissions.
-3. Configure a protected socket parent, such as `/run/pdp`, owned by root or the daemon and not writable by workloads. For distinct UIDs, arrange a client group and use socket mode `0660`. The templates' `0600` is for a same-user transport smoke test, not credential isolation.
-4. Install an administrator-owned copy of the selected configuration. Paths to schemas are relative to that file, so change `schemas.*.file` to an absolute path when moving it out of `examples/`. Keep adapters, policy and secrets outside caller write access.
-5. Start PDP as the daemon account. Run `pdp request` as the mapped workload account. The [systemd templates](systemd/) show separated accounts and socket-group access. SPIFFE mTLS is an [optional alternative](../docs/deployment.md#optional-spiffe-mtls), not required by these walkthroughs.
+## If you change the schema
 
-Replace every `APPROVED_*`, `UNAPPROVED_*` and `REPLACE_*` value before a live request. Request JSON files are templates too. Use a real approved issue UUID for Linear and an approved issue number for GitHub. Do not send credentials in caller headers or store them in request files.
+`policy.rego` pins the schema by digest. After editing the schema file, print the new digest and review what changed before updating the policy:
 
-## Safety and expected results
+```sh
+bin/pdp catalog --protocol rest --schema examples/packs/github-read/github-rest.json
+bin/pdp schema diff --protocol rest old.json new.json
+```
 
-Live reads require an approved account/resource scope. Comment examples are **provider writes**: run them only after explicit approval for a named disposable issue. There is no automatic write, cleanup or retry script. A timeout does not prove a write failed; inspect provider state before deciding whether to retry.
+The schema files are small reviewed request projections, not the providers' full APIs. An operation or field that is not in the schema is rejected before the policy runs.
 
-The guides describe expected PDP authorization. Success also depends on provider permissions and account setup. A Linear HTTP 200 may contain GraphQL errors, so inspect `data` and `errors`. A denied request must not reach the provider or acquire a credential. Local regression tests establish that ordering; an HTTP error alone is not proof of non-forwarding in a deployed system.
+## Safety
 
-The supported schema projections and built-in profiles are deliberately small. `read_write` means reviewed reads and comments, not arbitrary provider writes. Unknown operations and unsupported fields deny. Grants are additive: do not leave a broad `full` grant in place and expect a new narrow grant to restrict it. See [profile contents](../docs/configuration.md#exact-built-in-profiles) and [acceptance boundaries](../docs/acceptance.md).
+- The policy names the callers it allows. Any local UID that can open the socket reaches the policy and is refused by default deny. Keep the socket permissions tight as well.
+- Comment requests are provider writes. Send them only to a disposable issue you have approval to write to. Nothing here retries or cleans up. A timeout does not prove a write failed.
+- A Linear HTTP 200 can contain GraphQL errors. Check `data` and `errors` in the response.
+- These packs are tested against a local TLS server, with each pack's own policy, schema and adapter. No pack has been run against a real GitHub or Linear account, SPIRE or a cluster.

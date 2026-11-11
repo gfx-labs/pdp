@@ -1,0 +1,89 @@
+# Template only. Supply an approved immutable image and existing secret/config.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pdp
+  namespace: pdp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pdp
+  namespace: pdp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pdp
+  template:
+    metadata:
+      labels:
+        app: pdp
+    spec:
+      serviceAccountName: pdp
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pdp
+          image: example.invalid/pdp:REPLACE_WITH_APPROVED_DIGEST
+          args: [serve, --config, /etc/pdp/pdp.json]
+          ports:
+            - name: mtls
+              containerPort: 8443
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: mtls
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pdp
+              readOnly: true
+            - name: secrets
+              mountPath: /run/secrets
+              readOnly: true
+            - name: workload-api
+              mountPath: /run/spire/sockets
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: pdp-config
+        - name: secrets
+          secret:
+            secretName: pdp-provider-credentials
+            defaultMode: 0440
+        - name: workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pdp
+  namespace: pdp
+spec:
+  selector:
+    app: pdp
+  ports:
+    - name: mtls
+      port: 8443
+      targetPort: mtls

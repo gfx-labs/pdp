@@ -1,9 +1,0 @@
-{
-  "version": "pdp.authz/v1",
-  "identity": {"id": "local-worker"},
-  "provider": "github",
-  "binding": "github-local",
-  "schema_digest": "",
-  "http": {"method": "GET", "path": "/repos/APPROVED_OWNER/APPROVED_REPOSITORY"},
-  "operations": [{"id": "untyped:http:GET"}]
-}

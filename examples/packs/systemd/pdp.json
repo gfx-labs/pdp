@@ -1,0 +1,34 @@
+{
+  "version": "pdp.config/v2",
+  "revision": "systemd-v1",
+  "transport": {
+    "unix_socket": "/run/pdp/pdp.sock",
+    "socket_mode": "0660"
+  },
+  "routes": [
+    {
+      "provider": "github",
+      "binding": "github-local"
+    }
+  ],
+  "credentials": {
+    "providers": {
+      "github": {
+        "script_file": "adapter.star"
+      }
+    },
+    "bindings": {
+      "github-local": {
+        "provider": "github",
+        "secrets": {
+          "token": {
+            "systemd_credential": "github-token"
+          }
+        }
+      }
+    }
+  },
+  "policy": {
+    "modules": ["policy.rego"]
+  }
+}

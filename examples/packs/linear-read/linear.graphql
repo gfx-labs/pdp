@@ -1,0 +1,184 @@
+"""
+A comment associated with an issue, project update, initiative update, document content, post, project, or initiative. Comments support rich text (ProseMirror), emoji reactions, and threaded replies via parentId. Comments can be created by workspace users or by external users through integrations (e.g., Slack, Intercom). Each comment belongs to exactly one parent entity.
+"""
+type Comment implements Node {
+	"""
+	The unique identifier of the entity.
+	"""
+	id: ID!
+	"""
+	The comment content in markdown format. This is a derived representation of the canonical bodyData ProseMirror content.
+	"""
+	body: String!
+	"""
+	Comment's URL.
+	"""
+	url: String!
+	"""
+	The issue that the comment is associated with. Null if the comment belongs to a different parent entity type.
+	"""
+	issue: Issue
+}
+"""
+Input for creating a new comment.
+"""
+input CommentCreateInput {
+	"""
+	The comment content in markdown format.
+	"""
+	body: String
+	"""
+	[Internal] The comment content as a Prosemirror document.
+	"""
+	bodyData: JSON
+	"""
+	Create comment as a user with the provided name. This option is only available to OAuth applications creating comments in `actor=app` mode.
+	"""
+	createAsUser: String
+	"""
+	Flag to indicate this comment should be created on the issue's synced Slack comment thread. If no synced Slack comment thread exists, the mutation will fail. If there are multiple synced Slack threads on the issue, the oldest one will be targeted.
+	"""
+	createOnSyncedSlackThread: Boolean
+	"""
+	The time at which the comment was created (e.g. if importing from another system). Must be a time in the past. If none is provided, the backend will generate the time as now.
+	"""
+	createdAt: DateTime
+	"""
+	Provide an external user avatar URL. Can only be used in conjunction with the `createAsUser` options. This option is only available to OAuth applications creating comments in `actor=app` mode.
+	"""
+	displayIconUrl: String
+	"""
+	Flag to prevent auto subscription to the issue the comment is created on.
+	"""
+	doNotSubscribeToIssue: Boolean
+	"""
+	The document content to associate the comment with.
+	"""
+	documentContentId: String
+	"""
+	The identifier in UUID v4 format. If none is provided, the backend will generate one.
+	"""
+	id: String
+	"""
+	The initiative to associate the comment with. Can be a UUID or initiative identifier (e.g., 'I-12').
+	"""
+	initiativeId: String
+	"""
+	The initiative update to associate the comment with.
+	"""
+	initiativeUpdateId: String
+	"""
+	[Internal] Where the commented text starts, as a base64-encoded Y.js relative position created on the commenter's copy of the document content. Requires `inlineAnchorTo` and `documentContentId`.
+	"""
+	inlineAnchorFrom: String
+	"""
+	[Internal] Where the commented text ends, as a base64-encoded Y.js relative position created on the commenter's copy of the document content. Requires `inlineAnchorFrom` and `documentContentId`.
+	"""
+	inlineAnchorTo: String
+	"""
+	The issue to associate the comment with. Can be a UUID or issue identifier (e.g., 'LIN-123').
+	"""
+	issueId: String
+	"""
+	The parent comment under which to nest a current comment.
+	"""
+	parentId: String
+	"""
+	The post to associate the comment with.
+	"""
+	postId: String
+	"""
+	The project to associate the comment with. Can be a UUID or project identifier (e.g., 'P-LIN-123').
+	"""
+	projectId: String
+	"""
+	The project update to associate the comment with.
+	"""
+	projectUpdateId: String
+	"""
+	The text that this comment references. Only defined for inline comments.
+	"""
+	quotedText: String
+	"""
+	[INTERNAL] The identifiers of the users subscribing to this comment thread.
+	"""
+	subscriberIds: [String!]
+}
+"""
+The result of a comment mutation.
+"""
+type CommentPayload {
+	"""
+	The comment that was created or updated.
+	"""
+	comment: Comment!
+	"""
+	Whether the operation was successful.
+	"""
+	success: Boolean!
+	"""
+	The identifier of the last sync operation.
+	"""
+	lastSyncId: Float!
+}
+"""
+Represents a date and time in ISO 8601 format. Accepts shortcuts like `2021` to represent midnight Fri Jan 01 2021. Also accepts ISO 8601 durations strings which are added to the current date to create the represented date (e.g '-P2W1D' represents the date that was two weeks and 1 day ago)
+"""
+scalar DateTime
+"""
+An issue is the core work item in Linear. Issues belong to a team, have a workflow status, can be assigned to users, carry a priority level, and can be organized into projects and cycles. Issues support sub-issues (parent-child hierarchy up to 10 levels deep), labels, due dates, estimates, and SLA tracking. They can also be linked to other issues via relations, attached to releases, and tracked through their full history of changes.
+"""
+type Issue implements Node {
+	"""
+	The unique identifier of the entity.
+	"""
+	id: ID!
+	"""
+	Issue's human readable identifier (e.g. ENG-123).
+	"""
+	identifier: String!
+	"""
+	The issue's title. This is the primary human-readable summary of the work item.
+	"""
+	title: String!
+	"""
+	The issue's description in markdown format.
+	"""
+	description: String
+	"""
+	Issue URL.
+	"""
+	url: String!
+}
+"""
+The `JSON` scalar type represents arbitrary values as *stringified* JSON
+"""
+scalar JSON
+type Mutation {
+	"""
+	Creates a new comment.
+	"""
+	commentCreate(
+		"""
+		The comment object to create.
+		"""
+		input: CommentCreateInput!
+	): CommentPayload!
+}
+interface Node {
+	"""
+	The unique identifier of the entity.
+	"""
+	id: ID!
+}
+type Query {
+	"""
+	One specific issue, looked up by its unique identifier.
+	"""
+	issue(
+		"""
+		The identifier of the issue to retrieve.
+		"""
+		id: String!
+	): Issue!
+}

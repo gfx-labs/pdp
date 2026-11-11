@@ -1,0 +1,235 @@
+{
+  "info": {
+    "title": "GitHub restricted request projection",
+    "version": "2f8f80e47ea4d3292cf4e37ba9d9b25475e06140"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/repos/{owner}/{repo}": {
+      "get": {
+        "operationId": "repos/get",
+        "parameters": [
+          {
+            "description": "The account owner of the repository. The name is not case sensitive.",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The name of the repository without the `.git` extension. The name is not case sensitive.",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response"
+          },
+          "301": {
+            "description": "Provider response"
+          },
+          "403": {
+            "description": "Provider response"
+          },
+          "404": {
+            "description": "Provider response"
+          }
+        }
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{issue_number}": {
+      "get": {
+        "operationId": "issues/get",
+        "parameters": [
+          {
+            "description": "The account owner of the repository. The name is not case sensitive.",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The name of the repository without the `.git` extension. The name is not case sensitive.",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The number that identifies the issue.",
+            "in": "path",
+            "name": "issue_number",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response"
+          },
+          "301": {
+            "description": "Provider response"
+          },
+          "304": {
+            "description": "Provider response"
+          },
+          "404": {
+            "description": "Provider response"
+          },
+          "410": {
+            "description": "Provider response"
+          }
+        }
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{issue_number}/comments": {
+      "get": {
+        "operationId": "issues/list-comments",
+        "parameters": [
+          {
+            "description": "The account owner of the repository. The name is not case sensitive.",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The name of the repository without the `.git` extension. The name is not case sensitive.",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The number that identifies the issue.",
+            "in": "path",
+            "name": "issue_number",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The number of results per page (max 100). For more information, see \"[Using pagination in the REST API](https://docs.github.com/rest/using-the-rest-api/using-pagination-in-the-rest-api).\"",
+            "in": "query",
+            "name": "per_page",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The page number of the results to fetch. For more information, see \"[Using pagination in the REST API](https://docs.github.com/rest/using-the-rest-api/using-pagination-in-the-rest-api).\"",
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response"
+          },
+          "404": {
+            "description": "Provider response"
+          },
+          "410": {
+            "description": "Provider response"
+          }
+        }
+      },
+      "post": {
+        "operationId": "issues/create-comment",
+        "parameters": [
+          {
+            "description": "The account owner of the repository. The name is not case sensitive.",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The name of the repository without the `.git` extension. The name is not case sensitive.",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The number that identifies the issue.",
+            "in": "path",
+            "name": "issue_number",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "default": {
+                  "value": {
+                    "body": "Me too"
+                  }
+                }
+              },
+              "schema": {
+                "properties": {
+                  "body": {
+                    "description": "The contents of the comment.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "body"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Response"
+          },
+          "403": {
+            "description": "Provider response"
+          },
+          "404": {
+            "description": "Provider response"
+          },
+          "410": {
+            "description": "Provider response"
+          },
+          "422": {
+            "description": "Provider response"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "version": "pdp.config/v2",
+  "revision": "linear-comment-v1",
+  "transport": {
+    "unix_socket": "/run/pdp/pdp.sock",
+    "socket_mode": "0660"
+  },
+  "schemas": {
+    "linear": {
+      "protocol": "graphql",
+      "file": "linear.graphql"
+    }
+  },
+  "routes": [
+    {
+      "provider": "linear",
+      "binding": "linear-installation",
+      "schema": "linear",
+      "scopes": ["read", "comments:create"]
+    }
+  ],
+  "credentials": {
+    "providers": {
+      "linear": {
+        "script_file": "adapter.star",
+        "endpoints": {
+          "token": "https://api.linear.app/oauth/token"
+        }
+      }
+    },
+    "bindings": {
+      "linear-installation": {
+        "provider": "linear",
+        "linear_actor": "app",
+        "parameters": {
+          "client_id": "REPLACE_CLIENT_ID"
+        },
+        "secrets": {
+          "client_secret": {
+            "file": "/run/secrets/linear-client-secret"
+          }
+        },
+        "state_file": "/var/lib/pdp/linear-oauth/state.json",
+        "scopes": ["read", "comments:create"]
+      }
+    }
+  },
+  "policy": {
+    "modules": ["policy.rego"]
+  }
+}

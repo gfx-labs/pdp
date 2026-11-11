@@ -1,0 +1,9 @@
+{
+  "version": "pdp.authz/v1",
+  "identity": {"id": "uid:1000", "auth_method": "unix", "uid": 1000},
+  "provider": "github",
+  "binding": "github-local",
+  "schema_digest": "",
+  "http": {"method": "GET", "path": "/repos/APPROVED_OWNER/APPROVED_REPOSITORY"},
+  "operations": [{"id": "untyped:http:GET"}]
+}

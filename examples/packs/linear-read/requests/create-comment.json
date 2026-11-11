@@ -1,0 +1,10 @@
+{
+  "query": "mutation ApprovedComment($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id body } } }",
+  "operationName": "ApprovedComment",
+  "variables": {
+    "input": {
+      "issueId": "APPROVED_ISSUE_UUID",
+      "body": "PDP approved disposable acceptance comment"
+    }
+  }
+}

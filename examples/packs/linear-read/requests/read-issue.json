@@ -1,0 +1,7 @@
+{
+  "query": "query ApprovedIssue($id: String!) { issue(id: $id) { id identifier title description } }",
+  "operationName": "ApprovedIssue",
+  "variables": {
+    "id": "APPROVED_ISSUE_UUID"
+  }
+}

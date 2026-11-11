@@ -1,0 +1,50 @@
+{
+  "version": "pdp.config/v2",
+  "revision": "linear-read-v1",
+  "transport": {
+    "unix_socket": "/run/pdp/pdp.sock",
+    "socket_mode": "0660"
+  },
+  "schemas": {
+    "linear": {
+      "protocol": "graphql",
+      "file": "linear.graphql"
+    }
+  },
+  "routes": [
+    {
+      "provider": "linear",
+      "binding": "linear-app",
+      "schema": "linear",
+      "scopes": ["read"]
+    }
+  ],
+  "credentials": {
+    "providers": {
+      "linear": {
+        "script_file": "adapter.star",
+        "endpoints": {
+          "token": "https://api.linear.app/oauth/token"
+        }
+      }
+    },
+    "bindings": {
+      "linear-app": {
+        "provider": "linear",
+        "linear_actor": "app",
+        "parameters": {
+          "client_id": "REPLACE_CLIENT_ID"
+        },
+        "secrets": {
+          "client_secret": {
+            "file": "/run/secrets/linear-client-secret"
+          }
+        },
+        "scopes": ["read"]
+      }
+    }
+  },
+  "policy": {
+    "modules": ["policy.rego"]
+  }
+}

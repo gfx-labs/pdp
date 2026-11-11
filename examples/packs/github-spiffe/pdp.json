@@ -1,0 +1,43 @@
+{
+  "version": "pdp.config/v2",
+  "revision": "github-spiffe-v1",
+  "transport": {
+    "spiffe": {
+      "address": ":8443",
+      "workload_api": "unix:///run/spire/sockets/agent.sock"
+    }
+  },
+  "schemas": {
+    "github": {
+      "protocol": "rest",
+      "file": "github-rest.json"
+    }
+  },
+  "routes": [
+    {
+      "provider": "github",
+      "binding": "github-worker",
+      "schema": "github"
+    }
+  ],
+  "credentials": {
+    "providers": {
+      "github": {
+        "script_file": "adapter.star"
+      }
+    },
+    "bindings": {
+      "github-worker": {
+        "provider": "github",
+        "secrets": {
+          "token": {
+            "file": "/run/secrets/github-token"
+          }
+        }
+      }
+    }
+  },
+  "policy": {
+    "modules": ["policy.rego"]
+  }
+}

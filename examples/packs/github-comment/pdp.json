@@ -1,0 +1,52 @@
+{
+  "version": "pdp.config/v2",
+  "revision": "github-comment-v1",
+  "transport": {
+    "unix_socket": "/run/pdp/pdp.sock",
+    "socket_mode": "0660"
+  },
+  "schemas": {
+    "github": {
+      "protocol": "rest",
+      "file": "github-rest.json"
+    }
+  },
+  "routes": [
+    {
+      "provider": "github",
+      "binding": "github-app-repo",
+      "schema": "github"
+    }
+  ],
+  "credentials": {
+    "providers": {
+      "github": {
+        "script_file": "adapter.star",
+        "endpoints": {
+          "token": "https://api.github.com/app/installations/REPLACE_INSTALLATION_ID/access_tokens"
+        }
+      }
+    },
+    "bindings": {
+      "github-app-repo": {
+        "provider": "github",
+        "secrets": {
+          "private_key": {
+            "file": "/run/secrets/github-app.pem"
+          }
+        },
+        "github": {
+          "app_id": "REPLACE_APP_ID",
+          "repository_ids": [123456789],
+          "permissions": {
+            "contents": "read",
+            "issues": "write"
+          }
+        }
+      }
+    }
+  },
+  "policy": {
+    "modules": ["policy.rego"]
+  }
+}
