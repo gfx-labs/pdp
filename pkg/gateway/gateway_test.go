@@ -39,11 +39,26 @@ type harness struct {
 
 func policyFor(t *testing.T, version string, allow bool) *policy.Engine {
 	t.Helper()
-	cfg := policy.Config{Revision: version}
-	if allow {
-		cfg.Grants = []policy.Grant{{ID: "all", Mode: policy.Full, Scope: policy.Scope{Identities: []string{"alice"}, Providers: []string{"github", "linear"}, Bindings: []string{"installation"}}}}
+	module := "package pdp.authz\nimport rego.v1\ndefault allow := false\n"
+	uid := os.Getuid()
+	if !allow {
+		uid++
 	}
-	engine, err := policy.New(context.Background(), cfg)
+	module += fmt.Sprintf("allow if { input.identity.auth_method == \"unix\"; input.identity.uid == %d; input.provider in {\"github\", \"linear\"}; input.binding == \"installation\" }\nmatched_rules contains \"authenticated-peer\" if allow\n", uid)
+	return engineFor(t, version, module, nil)
+}
+
+func engineFor(t *testing.T, version, module string, data map[string]any) *policy.Engine {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "authz.rego")
+	if err := os.WriteFile(path, []byte(module), 0600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := policy.New(context.Background(), policy.Config{Revision: version, Modules: map[string]string{"authz.rego": string(source)}, Data: data})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,10 +96,7 @@ func newHarness(t *testing.T, handler http.HandlerFunc, allow bool, options Opti
 	}
 	h := &harness{roots: roots, endpoint: upstream.URL}
 	options.Audit = func(event AuditEvent) { h.eventsMu.Lock(); h.events = append(h.events, event); h.eventsMu.Unlock() }
-	authenticator, err := auth.NewUnix(map[uint32]string{uint32(os.Getuid()): "alice"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	authenticator := auth.NewUnix()
 	snapshot, err := NewSnapshot(SnapshotConfig{Version: "v1", Authenticator: authenticator, Policy: policyFor(t, "p1", allow), Credentials: managerFor(t, testToken), Routes: []Route{{Provider: "github", Binding: "installation", UpstreamURL: upstream.URL}}})
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +216,7 @@ func TestDeniedNeverForwards(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{}`)
 	}, false, Options{})
-	status, _, body := h.request(t, "GET", "/upstreams/github/repos/team/project", "", http.Header{"Authorization": {"Bearer trusted"}, "X-Principal": {"alice"}})
+	status, _, body := h.request(t, "GET", "/upstreams/github/repos/team/project", "", http.Header{"Authorization": {"Bearer trusted"}, "X-Principal": {"alice"}, "X-Uid": {fmt.Sprint(os.Getuid() + 1)}, "X-Spiffe-Id": {"spiffe://example.test/admin"}})
 	if status != 403 || calls.Load() != 0 || strings.Contains(body, testToken) {
 		t.Fatalf("denied request crossed boundary: status=%d calls=%d body=%s", status, calls.Load(), body)
 	}
@@ -218,6 +230,10 @@ func TestDeniedNeverForwards(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != 401 || calls.Load() != 0 {
 		t.Fatalf("non-Unix caller accepted: %d", response.StatusCode)
+	}
+	stats := h.g.Metrics().Credentials
+	if stats.Hits != 0 || stats.Misses != 0 || stats.Acquisitions != 0 {
+		t.Fatalf("denied peer accessed credentials: %+v", stats)
 	}
 }
 
@@ -351,11 +367,40 @@ func TestAtomicReload(t *testing.T) {
 	var calls atomic.Int64
 	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		close(started)
-		<-finish
+		if r.URL.Path == "/hold" {
+			close(started)
+			<-finish
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"done":true}`)
 	}, true, Options{})
+	conn, err := net.Dial("unix", h.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err = conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	onExistingConnection := func() int {
+		t.Helper()
+		if _, err := io.WriteString(conn, "GET /upstreams/github/warm HTTP/1.1\r\nHost: pdp\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if _, err = io.Copy(io.Discard, response.Body); err != nil {
+			t.Fatal(err)
+		}
+		return response.StatusCode
+	}
+	if status := onExistingConnection(); status != 200 {
+		t.Fatalf("initial peer authorization: %d", status)
+	}
 	result := make(chan int, 1)
 	go func() {
 		r, err := h.client.Get("http://pdp/upstreams/github/hold")
@@ -372,11 +417,8 @@ func TestAtomicReload(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream did not start")
 	}
-	authenticator, err := auth.NewUnix(map[uint32]string{uint32(os.Getuid()): "bob"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	next, err := NewSnapshot(SnapshotConfig{Version: "v2", Authenticator: authenticator, Policy: policyFor(t, "p2", true), Credentials: managerFor(t, "rotated-provider-token"), Routes: []Route{{Provider: "github", Binding: "installation", UpstreamURL: h.endpoint}}})
+	authenticator := auth.NewUnix()
+	next, err := NewSnapshot(SnapshotConfig{Version: "v2", Authenticator: authenticator, Policy: policyFor(t, "p2", false), Credentials: managerFor(t, "rotated-provider-token"), Routes: []Route{{Provider: "github", Binding: "installation", UpstreamURL: h.endpoint}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,9 +430,12 @@ func TestAtomicReload(t *testing.T) {
 		t.Fatal("old snapshot disposed while request in flight")
 	default:
 	}
-	status, _, _ := h.request(t, "GET", "/upstreams/github/hold", "", http.Header{})
-	if status != 403 || calls.Load() != 1 {
+	status := onExistingConnection()
+	if status != 403 || calls.Load() != 2 {
 		t.Fatalf("revoked identity reached upstream status=%d calls=%d", status, calls.Load())
+	}
+	if stats := h.g.Metrics().Credentials; stats.Hits != 0 || stats.Misses != 0 || stats.Acquisitions != 0 {
+		t.Fatalf("revoked peer accessed new credentials: %+v", stats)
 	}
 	close(finish)
 	if status := <-result; status != 200 {
@@ -477,22 +522,7 @@ func TestSchemaPolicyInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
-	constraint := policy.Constraints{Repositories: []string{"team/project"}, SchemaDigests: []string{rest.Digest()}, Relationship: &policy.RelationshipRequirement{Permission: "read", ResourceTypes: []string{"repository"}}}
-	queryConstraint := constraint
-	queryConstraint.Values = []policy.ValueConstraint{{Source: "query", Path: []string{"per_page"}, Values: []any{json.Number("10")}}}
-	scope := policy.Scope{Identities: []string{"alice"}, Providers: []string{"github"}, Bindings: []string{"installation"}, Operations: []string{"repos/get"}}
-	queryScope := scope
-	queryScope.Operations = []string{"issues/list-comments"}
-	cfg := policy.Config{Revision: "scoped-policy", Grants: []policy.Grant{{ID: "repository-read", Scope: scope, Mode: policy.Read, Constraints: constraint}, {ID: "comments-read", Scope: queryScope, Mode: policy.Read, Constraints: queryConstraint}}, Relationships: &policy.RelationshipSnapshot{
-		Revision: "graph-1", IssuedAt: now.Add(-time.Second), ExpiresAt: now.Add(time.Hour), MaxAge: time.Hour,
-		IdentityTasks: []policy.IdentityTask{{Identity: "alice", Task: "task-1", ExpiresAt: now.Add(time.Hour)}},
-		TaskResources: []policy.TaskResource{{Task: "task-1", Resource: policy.Resource{Type: "repository", ID: "team/project"}, Permission: "read", ExpiresAt: now.Add(time.Hour)}},
-	}, CustomModules: map[string]string{"verified-identity.rego": fmt.Sprintf("package pdp.custom\nimport rego.v1\ndeny contains \"wrong auth\" if { input.identity.auth_method != \"unix\" }\ndeny contains \"wrong uid\" if { input.identity.uid != %d }\n", os.Getuid())}}
-	for _, id := range []string{"repos/get", "issues/list-comments"} {
-		cfg.Operations = append(cfg.Operations, policy.Operation{ID: id, Provider: "github", SchemaDigest: rest.Digest(), Classification: policy.ReadOperation, Reviewed: true, Resources: []policy.ResourceSelector{{Type: "repository", Source: "path", Components: [][]string{{"owner"}, {"repo"}}}}})
-	}
-	engine, err := policy.New(context.Background(), cfg)
+	module, err := os.ReadFile("testdata/repository.rego")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,11 +534,13 @@ func TestSchemaPolicyInput(t *testing.T) {
 	}, true, Options{})
 	install := func(version, task string) {
 		t.Helper()
-		a, err := auth.NewUnix(map[uint32]string{uint32(os.Getuid()): "alice"})
-		if err != nil {
-			t.Fatal(err)
+		data := map[string]any{
+			"peer_uid":          os.Getuid(),
+			"identity_tasks":    map[string]any{fmt.Sprintf("uid:%d", os.Getuid()): task},
+			"task_repositories": map[string]any{"task-1": []any{"team/project"}},
 		}
-		s, err := NewSnapshot(SnapshotConfig{Version: version, Authenticator: a, PrincipalTasks: map[string]string{"alice": task}, Policy: engine, Credentials: managerFor(t, testToken), Routes: []Route{{Provider: "github", Binding: "installation", UpstreamURL: h.endpoint, REST: rest}}})
+		engine := engineFor(t, "scoped-policy", string(module), data)
+		s, err := NewSnapshot(SnapshotConfig{Version: version, Authenticator: auth.NewUnix(), Policy: engine, Credentials: managerFor(t, testToken), Routes: []Route{{Provider: "github", Binding: "installation", UpstreamURL: h.endpoint, REST: rest}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -539,7 +571,7 @@ func TestSchemaPolicyInput(t *testing.T) {
 	h.eventsMu.Lock()
 	defer h.eventsMu.Unlock()
 	for _, event := range h.events {
-		if event.Outcome == "forwarded" && (event.SchemaDigest != rest.Digest() || event.RelationshipRevision != "graph-1" || len(event.MatchedGrants) != 1) {
+		if event.Outcome == "forwarded" && (event.SchemaDigest != rest.Digest() || event.Principal != fmt.Sprintf("uid:%d", os.Getuid()) || len(event.MatchedRules) != 1) {
 			t.Fatalf("incomplete audit snapshot: %+v", event)
 		}
 	}
@@ -554,19 +586,11 @@ func TestLinearGraphQLBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowed := []string{"Query.issue", "Issue.id", "Issue.title"}
-	cfg := policy.Config{Revision: "graphql-policy", Grants: []policy.Grant{{ID: "issue-read", Mode: policy.Read, Scope: policy.Scope{Identities: []string{"alice"}, Providers: []string{"linear"}, Bindings: []string{"installation"}, Operations: allowed}, Constraints: policy.Constraints{Issues: []string{"APP-1"}, SchemaDigests: []string{gql.Digest()}}}}}
-	for _, id := range append(append([]string(nil), allowed...), "Issue.description") {
-		op := policy.Operation{ID: id, Provider: "linear", Reviewed: true, Classification: policy.ReadOperation, SchemaDigest: gql.Digest()}
-		if id == "Query.issue" {
-			op.Resources = []policy.ResourceSelector{{Type: "issue", Source: "graphql", Field: "Query.issue", Path: []string{"id"}}}
-		}
-		cfg.Operations = append(cfg.Operations, op)
-	}
-	engine, err := policy.New(context.Background(), cfg)
+	module, err := os.ReadFile("testdata/linear.rego")
 	if err != nil {
 		t.Fatal(err)
 	}
+	engine := engineFor(t, "graphql-policy", string(module), map[string]any{"peer_uid": os.Getuid(), "issue_fields": map[string]any{"APP-1": []any{"Issue.id", "Issue.title"}}})
 	var calls atomic.Int64
 	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -576,11 +600,7 @@ func TestLinearGraphQLBoundary(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"data":{"issue":{"id":"APP-1","title":"read"}}}`)
 	}, true, Options{})
-	a, err := auth.NewUnix(map[uint32]string{uint32(os.Getuid()): "alice"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := NewSnapshot(SnapshotConfig{Version: "graphql-v1", Authenticator: a, Policy: engine, Credentials: managerForProvider(t, testToken, "linear"), Routes: []Route{{Provider: "linear", Binding: "installation", UpstreamURL: h.endpoint + "/graphql", GraphQL: gql}}})
+	snapshot, err := NewSnapshot(SnapshotConfig{Version: "graphql-v1", Authenticator: auth.NewUnix(), Policy: engine, Credentials: managerForProvider(t, testToken, "linear"), Routes: []Route{{Provider: "linear", Binding: "installation", UpstreamURL: h.endpoint + "/graphql", GraphQL: gql}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,5 +624,23 @@ func TestLinearGraphQLBoundary(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("denied GraphQL request forwarded: calls=%d", calls.Load())
+	}
+	changed, err := schema.CompileGraphQL([]byte(strings.Replace(string(sdl), "title: String!", "title: String", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = NewSnapshot(SnapshotConfig{Version: "graphql-v2", Authenticator: auth.NewUnix(), Policy: engine, Credentials: managerForProvider(t, testToken, "linear"), Routes: []Route{{Provider: "linear", Binding: "installation", UpstreamURL: h.endpoint + "/graphql", GraphQL: changed}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = h.g.Reload(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	status, _, _ := h.request(t, "POST", "/upstreams/linear/graphql", `{"query":"{ issue(id:\"APP-1\") { id title } }"}`, http.Header{})
+	if status != 403 || calls.Load() != 1 {
+		t.Fatalf("schema digest pin bypassed: status=%d calls=%d", status, calls.Load())
+	}
+	if stats := h.g.Metrics().Credentials; stats.Hits != 0 || stats.Misses != 0 || stats.Acquisitions != 0 {
+		t.Fatalf("schema-mismatched request accessed credentials: %+v", stats)
 	}
 }

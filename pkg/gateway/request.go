@@ -278,7 +278,7 @@ func normalizeUntypedGraphQL(document, operationName string, variables map[strin
 }
 
 func policyInput(identity auth.Identity, route route, n *schema.Request, path string, query url.Values) policy.Input {
-	input := policy.Input{Version: policy.InputVersion, Identity: policy.Identity{ID: identity.Principal, AuthMethod: identity.Method, SPIFFEID: identity.SPIFFEID}, Provider: route.Provider, Binding: route.Binding,
+	input := policy.Input{Version: policy.InputVersion, Identity: policy.Identity{ID: identity.ID(), AuthMethod: identity.Method, SPIFFEID: identity.SPIFFEID}, Provider: route.Provider, Binding: route.Binding,
 		HTTP:          policy.HTTPInput{Method: n.Method, Path: path, PathParams: map[string]string{}, Query: query, NormalizedQuery: n.Query, Body: n.Body},
 		OperationType: n.OperationType, OperationName: n.OperationName, Variables: n.Variables}
 	if identity.Method == "unix" {

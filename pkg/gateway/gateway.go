@@ -32,13 +32,12 @@ type Route struct {
 }
 
 type SnapshotConfig struct {
-	Version        string
-	Authenticator  auth.Authenticator
-	PrincipalTasks map[string]string
-	Routes         []Route
-	Policy         *policy.Engine
-	Credentials    *credential.Manager
-	OnRetire       func()
+	Version       string
+	Authenticator auth.Authenticator
+	Routes        []Route
+	Policy        *policy.Engine
+	Credentials   *credential.Manager
+	OnRetire      func()
 }
 
 type route struct {
@@ -49,18 +48,17 @@ type route struct {
 // Snapshot holds one immutable routing, identity, schema, policy and adapter view.
 // Its dependencies must not be closed while a request using it remains in flight.
 type Snapshot struct {
-	version        string
-	authenticator  auth.Authenticator
-	principalTasks map[string]string
-	routes         map[string]route
-	policy         *policy.Engine
-	credentials    *credential.Manager
-	mu             sync.Mutex
-	refs           int
-	retired        bool
-	done           chan struct{}
-	onRetire       func()
-	cleanup        sync.Once
+	version       string
+	authenticator auth.Authenticator
+	routes        map[string]route
+	policy        *policy.Engine
+	credentials   *credential.Manager
+	mu            sync.Mutex
+	refs          int
+	retired       bool
+	done          chan struct{}
+	onRetire      func()
+	cleanup       sync.Once
 }
 
 func NewSnapshot(c SnapshotConfig) (*Snapshot, error) {
@@ -68,13 +66,6 @@ func NewSnapshot(c SnapshotConfig) (*Snapshot, error) {
 		return nil, errors.New("invalid gateway snapshot")
 	}
 	s := &Snapshot{version: c.Version, authenticator: c.Authenticator, policy: c.Policy, credentials: c.Credentials, routes: make(map[string]route), done: make(chan struct{}), onRetire: c.OnRetire}
-	s.principalTasks = make(map[string]string, len(c.PrincipalTasks))
-	for principal, task := range c.PrincipalTasks {
-		if !safeLabel(principal) || !safeLabel(task) {
-			return nil, errors.New("invalid principal task mapping")
-		}
-		s.principalTasks[principal] = task
-	}
 	for _, r := range c.Routes {
 		if !safeLabel(r.Binding) {
 			return nil, errors.New("invalid route binding")
@@ -179,19 +170,18 @@ type Options struct {
 }
 
 type AuditEvent struct {
-	Time                 time.Time `json:"time"`
-	Snapshot             string    `json:"snapshot"`
-	Principal            string    `json:"principal,omitempty"`
-	Provider             string    `json:"provider,omitempty"`
-	Operation            string    `json:"operation,omitempty"`
-	PolicyRevision       string    `json:"policy_revision,omitempty"`
-	SchemaDigest         string    `json:"schema_digest,omitempty"`
-	RelationshipRevision string    `json:"relationship_revision,omitempty"`
-	MatchedGrants        []string  `json:"matched_grants,omitempty"`
-	Operations           []string  `json:"operations,omitempty"`
-	Outcome              string    `json:"outcome"`
-	Status               int       `json:"status"`
-	DurationMS           int64     `json:"duration_ms"`
+	Time           time.Time `json:"time"`
+	Snapshot       string    `json:"snapshot"`
+	Principal      string    `json:"principal,omitempty"`
+	Provider       string    `json:"provider,omitempty"`
+	Operation      string    `json:"operation,omitempty"`
+	PolicyRevision string    `json:"policy_revision,omitempty"`
+	SchemaDigest   string    `json:"schema_digest,omitempty"`
+	MatchedRules   []string  `json:"matched_rules,omitempty"`
+	Operations     []string  `json:"operations,omitempty"`
+	Outcome        string    `json:"outcome"`
+	Status         int       `json:"status"`
+	DurationMS     int64     `json:"duration_ms"`
 }
 
 type Metrics struct {
@@ -375,11 +365,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 	fail := func(code int, reason string) { status = code; outcome = reason; writeError(w, code, reason) }
 	identity, err := s.authenticator.Authenticate(r)
-	if err != nil || !safeLabel(identity.Principal) {
+	if err != nil || !safeLabel(identity.ID()) {
 		fail(http.StatusUnauthorized, "unauthenticated")
 		return
 	}
-	event.Principal = identity.Principal
+	event.Principal = identity.ID()
 	provider, path, ok := selectRoute(r.URL.Path)
 	if !ok {
 		fail(http.StatusNotFound, "route_not_found")
@@ -415,7 +405,6 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input := policyInput(identity, route, normalized, path, query)
-	input.Identity.TaskID = s.principalTasks[identity.Principal]
 	event.SchemaDigest = input.SchemaDigest
 	for _, op := range input.Operations {
 		if safeLabel(op.ID) {
@@ -426,10 +415,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		event.Operation = input.Operations[0].ID
 	}
 	decision, err := s.policy.Evaluate(ctx, input)
-	event.RelationshipRevision = auditLabel(decision.RelationshipRevision)
-	for _, grant := range decision.MatchedGrants {
-		if safeLabel(grant) {
-			event.MatchedGrants = append(event.MatchedGrants, grant)
+	for _, rule := range decision.MatchedRules {
+		if safeLabel(rule) {
+			event.MatchedRules = append(event.MatchedRules, rule)
 		}
 	}
 	if err != nil || !decision.Allow {
