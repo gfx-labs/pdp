@@ -17,26 +17,32 @@ import (
 	"github.com/gfx-labs/pdp/pkg/credential"
 	"github.com/gfx-labs/pdp/pkg/policy"
 	"github.com/gfx-labs/pdp/pkg/schema"
-	"go.yaml.in/yaml/v3"
 )
 
-const Version = "pdp.config/v1"
+const Version = "pdp.config/v2"
 const MaxConfigBytes = 4 << 20
 const MaxSchemaBytes = 4 << 20
+const MaxPolicyBytes = 4 << 20
+const MaxAdapterBytes = 1 << 20
 
 // Relative paths are resolved against the configuration file, never cwd.
 type Config struct {
-	Version        string            `json:"version"`
-	Revision       string            `json:"revision"`
-	CAFile         string            `json:"ca_file,omitempty"`
-	Limits         Limits            `json:"limits,omitempty"`
-	Transport      Transport         `json:"transport"`
-	Identities     map[uint32]string `json:"identities"`
-	PrincipalTasks map[string]string `json:"principal_tasks,omitempty"`
-	Schemas        map[string]Schema `json:"schemas,omitempty"`
-	Routes         []Route           `json:"routes"`
-	Credentials    credential.Config `json:"credentials"`
-	Policy         policy.Config     `json:"policy"`
+	Version     string            `json:"version"`
+	Revision    string            `json:"revision"`
+	CAFile      string            `json:"ca_file,omitempty"`
+	Limits      Limits            `json:"limits,omitempty"`
+	Transport   Transport         `json:"transport"`
+	Schemas     map[string]Schema `json:"schemas,omitempty"`
+	Routes      []Route           `json:"routes"`
+	Credentials credential.Config `json:"credentials"`
+	Policy      Policy            `json:"policy"`
+}
+
+// Policy names administrator-authored Rego modules and optional OPA data.
+// Data accepts at most one JSON object file, without merging or rewriting it.
+type Policy struct {
+	Modules []string `json:"modules"`
+	Data    []string `json:"data,omitempty"`
 }
 
 type Limits struct {
@@ -54,9 +60,8 @@ type Transport struct {
 }
 
 type SPIFFE struct {
-	Address     string            `json:"address"`
-	WorkloadAPI string            `json:"workload_api"`
-	Principals  map[string]string `json:"principals"`
+	Address     string `json:"address"`
+	WorkloadAPI string `json:"workload_api"`
 }
 
 type Schema struct {
@@ -96,6 +101,10 @@ func readFile(path string, limit int64) ([]byte, error) {
 		return nil, errors.New("cannot open configuration dependency")
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("configuration dependency must be a regular file")
+	}
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil || int64(len(data)) > limit {
 		return nil, errors.New("configuration dependency exceeds limit or is unreadable")
@@ -110,42 +119,25 @@ func resolve(base, path string) string {
 	return filepath.Join(base, path)
 }
 
-// decode uses JSON tags as the single public naming convention for JSON and
-// YAML. YAML duplicate keys, multiple documents and JSON unknown fields fail.
+// decode accepts only strict JSON. Duration conversion is limited to typed
+// runtime limits, never arbitrary provider parameters or authored policy data.
 func decode(data []byte, target any) error {
-	var raw any
-	if json.Valid(data) {
-		var err error
-		raw, err = schema.DecodeJSON(data)
-		if err != nil {
-			return errors.New("invalid configuration JSON")
-		}
-	} else {
-		dec := yaml.NewDecoder(bytes.NewReader(data))
-		var node yaml.Node
-		if err := dec.Decode(&node); err != nil {
-			return errors.New("invalid configuration syntax")
-		}
-		var extra yaml.Node
-		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-			return errors.New("configuration must contain exactly one document")
-		}
-		var err error
-		raw, err = yamlValue(&node, 0)
-		if err != nil {
-			return err
-		}
+	raw, err := schema.DecodeJSON(data)
+	if err != nil {
+		return errors.New("invalid configuration JSON")
 	}
-	if root, ok := raw.(map[string]any); ok {
-		for _, path := range [][]string{{"limits", "request_timeout"}, {"credentials", "limits", "timeout"}, {"credentials", "limits", "expiry_margin"}, {"policy", "relationships", "max_age"}} {
-			if err := normalizeDuration(root, path); err != nil {
-				return err
-			}
+	root, ok := raw.(map[string]any)
+	if !ok {
+		return errors.New("configuration must be a JSON object")
+	}
+	for _, path := range [][]string{{"limits", "request_timeout"}, {"credentials", "limits", "timeout"}, {"credentials", "limits", "expiry_margin"}} {
+		if err := normalizeDuration(root, path); err != nil {
+			return err
 		}
 	}
 	b, err := json.Marshal(raw)
 	if err != nil {
-		return errors.New("configuration keys must be strings")
+		return errors.New("invalid configuration JSON")
 	}
 	jd := json.NewDecoder(bytes.NewReader(b))
 	jd.DisallowUnknownFields()
@@ -154,73 +146,6 @@ func decode(data []byte, target any) error {
 		return errors.New("invalid configuration field or value")
 	}
 	return nil
-}
-
-// Numeric lexemes pass through JSON's exact-number parser, never float64.
-// YAML aliases, merges and non-string keys have no configuration semantics.
-func yamlValue(node *yaml.Node, depth int) (any, error) {
-	if depth > 64 {
-		return nil, errors.New("configuration nesting exceeds limit")
-	}
-	switch node.Kind {
-	case yaml.DocumentNode:
-		if len(node.Content) != 1 {
-			return nil, errors.New("empty configuration")
-		}
-		return yamlValue(node.Content[0], depth)
-	case yaml.MappingNode:
-		out := map[string]any{}
-		for i := 0; i < len(node.Content); i += 2 {
-			key := node.Content[i]
-			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
-				return nil, errors.New("configuration keys must be strings, quote numeric UIDs")
-			}
-			if _, exists := out[key.Value]; exists {
-				return nil, errors.New("duplicate configuration key")
-			}
-			value, err := yamlValue(node.Content[i+1], depth+1)
-			if err != nil {
-				return nil, err
-			}
-			out[key.Value] = value
-		}
-		return out, nil
-	case yaml.SequenceNode:
-		out := make([]any, 0, len(node.Content))
-		for _, child := range node.Content {
-			value, err := yamlValue(child, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, value)
-		}
-		return out, nil
-	case yaml.ScalarNode:
-		switch node.Tag {
-		case "!!str", "!!timestamp":
-			return node.Value, nil
-		case "!!null":
-			if node.Value == "" || node.Value == "~" || strings.EqualFold(node.Value, "null") {
-				return nil, nil
-			}
-		case "!!bool":
-			if strings.EqualFold(node.Value, "true") {
-				return true, nil
-			}
-			if strings.EqualFold(node.Value, "false") {
-				return false, nil
-			}
-		case "!!int", "!!float":
-			value, err := schema.DecodeJSON([]byte(node.Value))
-			if err == nil {
-				if number, ok := value.(json.Number); ok {
-					return number, nil
-				}
-			}
-			return nil, errors.New("configuration numbers must use finite JSON numeric notation")
-		}
-	}
-	return nil, errors.New("unsupported YAML alias, merge or tag")
 }
 
 func normalizeDuration(root map[string]any, path []string) error {
@@ -232,14 +157,67 @@ func normalizeDuration(root map[string]any, path []string) error {
 		root = next
 	}
 	key := path[len(path)-1]
-	if value, ok := root[key].(string); ok {
+	value, exists := root[key]
+	if !exists {
+		return nil
+	}
+	switch value := value.(type) {
+	case string:
 		d, err := time.ParseDuration(value)
 		if err != nil {
 			return errors.New("invalid configuration duration")
 		}
 		root[key] = int64(d)
+	case json.Number:
+		if _, err := value.Int64(); err != nil {
+			return errors.New("configuration duration must be integer nanoseconds or a duration string")
+		}
+	default:
+		return errors.New("configuration duration must be integer nanoseconds or a duration string")
 	}
 	return nil
+}
+
+func loadPolicy(base, revision string, files Policy) (policy.Config, error) {
+	c := policy.Config{Revision: revision, Modules: make(map[string]string), Data: make(map[string]any)}
+	if len(files.Modules) == 0 || len(files.Data) > 1 {
+		return c, errors.New("policy requires Rego modules and at most one JSON data file")
+	}
+	remaining := int64(MaxPolicyBytes)
+	for _, path := range files.Modules {
+		if path == "" || filepath.Ext(path) != ".rego" {
+			return c, errors.New("policy module must name a Rego file")
+		}
+		path = filepath.Clean(resolve(base, path))
+		if _, exists := c.Modules[path]; exists {
+			return c, errors.New("duplicate policy module file")
+		}
+		data, err := readFile(path, remaining)
+		if err != nil {
+			return c, err
+		}
+		remaining -= int64(len(data))
+		c.Modules[path] = string(data)
+	}
+	if len(files.Data) == 1 {
+		if files.Data[0] == "" {
+			return c, errors.New("policy data file is required")
+		}
+		data, err := readFile(resolve(base, files.Data[0]), MaxPolicyBytes)
+		if err != nil {
+			return c, err
+		}
+		value, err := schema.DecodeJSON(data)
+		if err != nil {
+			return c, errors.New("invalid policy data JSON")
+		}
+		var ok bool
+		c.Data, ok = value.(map[string]any)
+		if !ok {
+			return c, errors.New("policy data must be a JSON object")
+		}
+	}
+	return c, nil
 }
 
 func Load(ctx context.Context, path string) (_ *Loaded, err error) {
@@ -264,6 +242,20 @@ func Load(ctx context.Context, path string) (_ *Loaded, err error) {
 		c.Transport.SocketMode = "0600"
 	}
 	c.Credentials.CredentialsDirectory = resolve(base, c.Credentials.CredentialsDirectory)
+	for name, p := range c.Credentials.Providers {
+		if (p.Script == "") == (p.ScriptFile == "") {
+			return nil, errors.New("credential adapter requires exactly one of script or script_file")
+		}
+		if p.ScriptFile != "" {
+			script, err := readFile(resolve(base, p.ScriptFile), MaxAdapterBytes)
+			if err != nil {
+				return nil, err
+			}
+			p.Script = string(script)
+			p.ScriptFile = ""
+			c.Credentials.Providers[name] = p
+		}
+	}
 	for name, b := range c.Credentials.Bindings {
 		b.StateFile = resolve(base, b.StateFile)
 		for alias, source := range b.Secrets {
@@ -320,27 +312,26 @@ func Load(ctx context.Context, path string) (_ *Loaded, err error) {
 			return nil, errors.New("schema protocol must be rest or graphql")
 		}
 	}
+	providers := make(map[string]bool)
 	for _, r := range c.Routes {
+		if providers[r.Provider] {
+			return nil, errors.New("duplicate provider route")
+		}
+		providers[r.Provider] = true
 		if r.Schema != "" {
 			if _, ok := l.Catalogs[r.Schema]; !ok {
 				return nil, errors.New("route references an unknown schema")
 			}
 		}
 	}
-	addProfiles(&c, l.Catalogs)
-	if err = validateReferences(&c, l.Catalogs); err != nil {
+	policyConfig, err := loadPolicy(base, c.Revision, c.Policy)
+	if err != nil {
 		return nil, err
 	}
-	c.Policy.Revision = c.Revision
 	l.Config = c
-	l.Policy, err = policy.New(ctx, c.Policy)
+	l.Policy, err = policy.New(ctx, policyConfig)
 	if err != nil {
 		return nil, errors.New("invalid authorization policy")
-	}
-	for _, d := range l.Policy.Diagnostics() {
-		if d.Code == "unknown_operation_reference" {
-			return nil, errors.New("policy references an unknown operation")
-		}
 	}
 	l.Credentials, err = credential.New(c.Credentials)
 	if err != nil {
