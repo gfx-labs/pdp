@@ -25,6 +25,8 @@ Clients with a subscription login try to refresh their own token. `token_paths` 
 
 Each `state_file` must exist before serving and hold the initial refresh token obtained from the provider's own login flow. This pack does not perform that login.
 
+The pack's stand-in provider has a client secret. A login made by a provider's own CLI usually has none. For one, drop `secrets` from the binding and call `oauth_refresh("token", parameter("client_id"))` in `adapter.star`, with `encoding="json"` or `send_scope=True` where the provider's token endpoint needs them. See [pkg/credential/README.md](../../../pkg/credential/README.md).
+
 ## Check
 
 ```sh

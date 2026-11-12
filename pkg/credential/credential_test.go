@@ -436,6 +436,80 @@ func TestRefreshSerializedAndDurable(t *testing.T) {
 	}
 }
 
+// Subscription logins are public clients: no client secret, and one provider
+// takes a JSON body with a scope. The endpoint here rejects anything else, so
+// a wrong request shape cannot pass.
+func TestRefreshPublicClient(t *testing.T) {
+	cases := []struct {
+		name, script, contentType string
+		wantScope                 string
+	}{
+		{"form", `def acquire(request):
+    return oauth_refresh("token", parameter("client_id"))`, "application/x-www-form-urlencoded", ""},
+		{"json with scope", `def acquire(request):
+    return oauth_refresh("token", parameter("client_id"), encoding="json", send_scope=True)`, "application/json", "read write"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := privateDir(t)
+			statePath := secretFile(t, dir, "state.json", `{"refresh_token":"refresh-0","scopes":["read","write"]}`)
+			c, _ := tlsConfig(t, tc.script, func(w http.ResponseWriter, r *http.Request) {
+				fields := map[string]string{}
+				if r.Header.Get("Content-Type") != tc.contentType {
+					t.Errorf("content type %q", r.Header.Get("Content-Type"))
+				}
+				if tc.contentType == "application/json" {
+					if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+						t.Error(err)
+					}
+				} else {
+					if err := r.ParseForm(); err != nil {
+						t.Error(err)
+					}
+					for name := range r.PostForm {
+						fields[name] = r.PostForm.Get(name)
+					}
+				}
+				want := map[string]string{"grant_type": "refresh_token", "refresh_token": "refresh-0", "client_id": "fixture-client"}
+				if tc.wantScope != "" {
+					want["scope"] = tc.wantScope
+				}
+				if len(fields) != len(want) {
+					t.Errorf("token request has %d fields, want %d", len(fields), len(want))
+				}
+				for name, value := range want {
+					if fields[name] != value {
+						t.Errorf("token request field %s is wrong", name)
+					}
+				}
+				_, _ = io.WriteString(w, `{"access_token":"access-1","refresh_token":"refresh-1","token_type":"Bearer","expires_in":3600}`)
+			})
+			b := c.Bindings["binding"]
+			b.StateFile = statePath
+			b.Secrets = nil
+			c.Bindings["binding"] = b
+			got, err := manager(t, c).Get(context.Background(), request())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if authorization(t, got) != "Bearer access-1" {
+				t.Fatal("wrong refreshed access token")
+			}
+			raw, err := os.ReadFile(statePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted struct {
+				RefreshToken string `json:"refresh_token"`
+				Pending      bool   `json:"recovery_required"`
+			}
+			if json.Unmarshal(raw, &persisted) != nil || persisted.RefreshToken != "refresh-1" || persisted.Pending {
+				t.Fatal("rotated refresh token was not persisted")
+			}
+		})
+	}
+}
+
 // The real provider endpoint makes persistence fail only after accepting the
 // refresh. This protects against returning or later caching an uncommitted pair.
 func TestRotationPersistenceFailureNeverReleasesCredential(t *testing.T) {

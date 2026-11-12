@@ -72,7 +72,7 @@ An adapter defines `acquire(request)` and returns a native credential result. `r
 | `jwt_rs256(key, issuer)` | Opaque RS256 JWT, backdated 60 seconds, expiry nine minutes ahead. RSA keys 2048 through 8192 bits only. |
 | `github_installation(endpoint, key)` | Signs the configured app JWT and exchanges it with mandatory fixed repository IDs and permissions. |
 | `oauth_client_credentials(endpoint, client_id, client_secret, authentication="body")` | Shared OAuth grant with space-separated authorized scopes. Supports `authentication="basic"`. |
-| `oauth_refresh(endpoint, client_id, client_secret, authentication="body")` | Serialized, durable token-pair rotation from binding state. |
+| `oauth_refresh(endpoint, client_id, client_secret=None, authentication="body", encoding="form", send_scope=False)` | Serialized, durable token-pair rotation from binding state. Without `client_secret` the grant is a public client's and sends only `client_id`. `encoding="json"` sends the grant as a JSON object. `send_scope=True` adds the binding's scopes, space separated. |
 | `linear_client_credentials(endpoint, client_id, client_secret)` | Explicit app-actor client-credentials grant, comma-separated scopes. |
 | `linear_refresh(endpoint, client_id, client_secret)` | Existing authorization-code grant, explicit administrator-attested app or user actor. |
 
@@ -112,6 +112,8 @@ Every refresh locks the adjacent `.lock` file with a context-aware OS advisory l
 Before sending a refresh, the runtime atomically writes and fsyncs `recovery_required: true`. It persists through cancellation, process death, unknown responses, malformed responses and failed replacement persistence. A valid replacement refresh token is retained even when access-token validation fails, with the recovery marker still set. No new access credential is returned until a complete usable pair has been written to a same-directory `0600` temporary file, fsynced, renamed, and its parent directory fsynced.
 
 A state marked `recovery_required` cannot refresh again, including after manager reload or process restart. This is intentionally conservative: even a definitive provider error requires administrator reconciliation. Recover through the provider's documented authorization/recovery process, replace the complete state under the same lock, and reload. Never merely clear the marker or replay a historical refresh token without reconciling its outcome. Persistence failure also poisons the running binding. Removing the manager does not make marked state usable.
+
+A login made by a provider's own CLI is usually a public client: call `oauth_refresh("token", parameter("client_id"))` with no secret, and add `encoding="json"` and `send_scope=True` when the provider's token endpoint takes a JSON body or wants the scope repeated. A public client cannot use `authentication="basic"`. The other OAuth builtins still require a client secret and a form body.
 
 Refresh scopes must equal the binding's entire original scope set. The helper does not pretend that a broader installation can mint arbitrary requested subscopes. An omitted response scope means the provider retained the explicitly attested grant. An explicit response scope must exactly match the requested set.
 

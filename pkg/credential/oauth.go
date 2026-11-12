@@ -74,6 +74,21 @@ type oauthResponse struct {
 	Scope        json.RawMessage `json:"scope"`
 }
 
+// tokenBody encodes one grant as the form RFC 6749 specifies, or as the JSON
+// object some token endpoints take in its place.
+func tokenBody(form url.Values, encoding string) (string, []byte) {
+	if encoding != "json" {
+		return "application/x-www-form-urlencoded", []byte(form.Encode())
+	}
+	fields := make(map[string]string, len(form))
+	for name := range form {
+		fields[name] = form.Get(name)
+	}
+	// A map of strings always marshals.
+	raw, _ := json.Marshal(fields)
+	return "application/json", raw
+}
+
 func scopesEqual(a, b []string) bool {
 	ac, ae := canonicalScopes(a)
 	bc, be := canonicalScopes(b)
@@ -117,24 +132,37 @@ func (e *execution) tokenResponse(raw []byte) (oauthResponse, Result, error) {
 }
 func (e *execution) oauth(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kw []starlark.Tuple) (starlark.Value, error) {
 	var endpoint, clientID string
-	var value starlark.Value
-	authentication := "body"
-	if err := starlark.UnpackArgs(b.Name(), args, kw, "endpoint", &endpoint, "client_id", &clientID, "client_secret", &value, "authentication?", &authentication); err != nil {
+	var value starlark.Value = starlark.None
+	authentication, encoding := "body", "form"
+	sendScope := false
+	if err := starlark.UnpackArgs(b.Name(), args, kw, "endpoint", &endpoint, "client_id", &clientID, "client_secret?", &value, "authentication?", &authentication, "encoding?", &encoding, "send_scope?", &sendScope); err != nil {
 		return nil, err
 	}
-	if !validValue(clientID, 1024) || (authentication != "basic" && authentication != "body") {
+	if !validValue(clientID, 1024) || (authentication != "basic" && authentication != "body") || (encoding != "form" && encoding != "json") {
 		return nil, failure(CodeInvalid)
 	}
-	handle, ok := value.(*secretHandle)
-	if !ok {
+	// A public client has no secret. Only the generic refresh grant accepts
+	// that, a JSON body or a scope parameter.
+	public := value == starlark.None
+	if b.Name() != "oauth_refresh" && (public || encoding != "form" || sendScope) {
 		return nil, failure(CodeInvalid)
 	}
-	secret, err := e.material(handle)
-	if err != nil {
-		return nil, err
-	}
-	if !validValue(string(secret), 65536) {
+	if (public && authentication != "body") || (sendScope && len(e.request.Scopes) == 0) {
 		return nil, failure(CodeInvalid)
+	}
+	var secret []byte
+	if !public {
+		handle, ok := value.(*secretHandle)
+		if !ok {
+			return nil, failure(CodeInvalid)
+		}
+		var err error
+		if secret, err = e.material(handle); err != nil {
+			return nil, err
+		}
+		if !validValue(string(secret), 65536) {
+			return nil, failure(CodeInvalid)
+		}
 	}
 	linear := strings.HasPrefix(b.Name(), "linear_")
 	refresh := strings.HasSuffix(b.Name(), "refresh")
@@ -148,13 +176,16 @@ func (e *execution) oauth(_ *starlark.Thread, b *starlark.Builtin, args starlark
 	}
 	form := url.Values{}
 	headers := make(http.Header)
+	headers.Set("Accept", "application/json")
 	if authentication == "basic" {
 		// RFC 6749 encodes each component before applying HTTP Basic.
 		req := &http.Request{Header: headers}
 		req.SetBasicAuth(url.QueryEscape(clientID), url.QueryEscape(string(secret)))
 	} else {
 		form.Set("client_id", clientID)
-		form.Set("client_secret", string(secret))
+		if !public {
+			form.Set("client_secret", string(secret))
+		}
 	}
 	var previous tokenState
 	if refresh {
@@ -180,15 +211,20 @@ func (e *execution) oauth(_ *starlark.Thread, b *starlark.Builtin, args starlark
 		if !scopesEqual(previous.Scopes, e.binding.Scopes) {
 			return nil, failure(CodeInvalid)
 		}
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", previous.RefreshToken)
+		if sendScope {
+			form.Set("scope", strings.Join(e.request.Scopes, " "))
+		}
+		contentType, body := tokenBody(form, encoding)
+		defer clear(body)
 		// Persist intent before the external effect. A lost response or crash must
 		// not let another process replay a possibly consumed refresh token.
 		previous.Pending = true
 		if err := persistState(path, previous, e.manager.cfg.Limits.MaxHTTPResponseBytes); err != nil {
 			return nil, err
 		}
-		form.Set("grant_type", "refresh_token")
-		form.Set("refresh_token", previous.RefreshToken)
-		raw, err := e.post(endpoint, "application/x-www-form-urlencoded", []byte(form.Encode()), headers)
+		raw, err := e.post(endpoint, contentType, body, headers)
 		if err != nil {
 			return nil, err
 		}
