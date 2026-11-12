@@ -3,6 +3,7 @@ module github.com/gfx-labs/pdp
 go 1.27.3
 
 require (
+	github.com/goccy/go-yaml v1.19.2
 	github.com/open-policy-agent/opa v1.22.2
 	github.com/spiffe/go-spiffe/v2 v2.9.0
 	github.com/vektah/gqlparser/v2 v2.5.64

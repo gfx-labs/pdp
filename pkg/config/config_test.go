@@ -57,6 +57,30 @@ func (f *fixture) path(t *testing.T) string {
 	return f.write(t, "config.json", string(data))
 }
 
+// yaml is the fixture's configuration in block style.
+func (f *fixture) yaml() string {
+	return `version: pdp.config/v3
+revision: loader-test
+transport:
+  unix_socket: run/pdp.sock
+policy:
+  modules:
+    - authz.rego
+credentials:
+  credentials_directory: secrets
+  providers:
+    provider:
+      script_file: adapter.star
+  bindings:
+    binding:
+      provider: provider
+      state_file: state/oauth.json
+      secrets:
+        token:
+          file: secrets/not-present
+`
+}
+
 // This boundary proves file resolution, exact OPA data and literal strings survive
 // the real loader rather than only the policy engine's in-memory configuration.
 func TestLoadAuthoredPolicySnapshot(t *testing.T) {
@@ -145,7 +169,7 @@ matched_rules := [] if not allow
 	}
 }
 
-func TestLoadRejectsLegacyAndNonJSONConfiguration(t *testing.T) {
+func TestLoadRejectsLegacyAndMalformedConfiguration(t *testing.T) {
 	for _, key := range []string{"grants", "mode", "custom_modules", "operations", "denies", "mandatory", "relationships"} {
 		t.Run("policy/"+key, func(t *testing.T) {
 			f := newFixture(t)
@@ -168,19 +192,58 @@ func TestLoadRejectsLegacyAndNonJSONConfiguration(t *testing.T) {
 		assertRejected(t, f.path(t))
 	})
 	for name, contents := range map[string]string{
-		"yaml":         "version: pdp.config/v3\nrevision: yaml\npolicy:\n  modules: [authz.rego]\n",
-		"yaml-json":    "# YAML comment\n{\"version\":\"pdp.config/v3\"}",
-		"duplicate":    `{"version":"pdp.config/v3","version":"pdp.config/v3"}`,
-		"trailing":     `{"version":"pdp.config/v3"} {}`,
-		"array":        `[]`,
-		"null":         `null`,
-		"nested-dupes": `{"transport":{"unix_socket":"one","unix_socket":"two"}}`,
-		"invalid-utf8": "{\"revision\":\"\xff\"}",
+		"duplicate":       `{"version":"pdp.config/v3","version":"pdp.config/v3"}`,
+		"trailing":        `{"version":"pdp.config/v3"} {}`,
+		"array":           `[]`,
+		"null":            `null`,
+		"empty":           "# only a comment\n",
+		"nested-dupes":    `{"transport":{"unix_socket":"one","unix_socket":"two"}}`,
+		"invalid-utf8":    "{\"revision\":\"\xff\"}",
+		"yaml-duplicate":  "revision: one\nrevision: two\n",
+		"yaml-documents":  "revision: one\n---\nrevision: two\n",
+		"yaml-unknown":    "version: pdp.config/v3\nrevision: yaml\nroutes: []\n",
+		"yaml-not-number": "limits:\n  max_concurrent: .inf\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
 			assertRejected(t, f.write(t, "config.json", contents))
 		})
+	}
+	// An alias or merge key applies one written value in several places, and a
+	// tag changes its type. In a file that wires credentials to hosts, what is
+	// written must be what is applied. Each addition is otherwise valid.
+	for name, addition := range map[string]string{
+		"anchor":    "limits: &shared {max_concurrent: 4}\n",
+		"merge-key": "limits:\n  <<: {max_concurrent: 4}\n",
+		"tag":       "limits:\n  max_concurrent: !!int 4\n",
+	} {
+		t.Run("yaml-"+name, func(t *testing.T) {
+			f := newFixture(t)
+			assertRejected(t, f.write(t, "pdp.yaml", f.yaml()+addition))
+		})
+	}
+}
+
+// A YAML file is the same configuration as its JSON form: block style,
+// comments and duration strings load, and paths still resolve from the file.
+func TestLoadYAMLConfiguration(t *testing.T) {
+	f := newFixture(t)
+	path := f.write(t, "pdp.yaml", "# administrator notes\n"+f.yaml()+"limits:\n  request_timeout: 7s\n  max_concurrent: 3\n")
+	loaded, err := config.Load(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loaded.Close()
+	c := loaded.Config
+	if c.Revision != "loader-test" || c.Limits.RequestTimeout != 7*time.Second || c.Limits.MaxConcurrent != 3 || c.Transport.UnixSocket != filepath.Join(f.dir, "run/pdp.sock") {
+		t.Fatalf("YAML configuration loaded as %+v", c)
+	}
+	decision, err := loaded.Policy.Evaluate(context.Background(), policy.Input{
+		Version: policy.InputVersion, Identity: policy.Identity{ID: "uid:123"}, Protocol: policy.ProtocolHTTP,
+		Destination: policy.Destination{Scheme: "https", Host: "api.example.test", Port: 443}, HTTP: &policy.HTTPInput{Method: "GET", Path: "/"},
+	})
+	if err != nil || decision.Allow {
+		t.Fatalf("policy named by a YAML configuration did not evaluate: decision=%+v err=%v", decision, err)
 	}
 }
 

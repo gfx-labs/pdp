@@ -2,7 +2,7 @@
 #
 # Nothing here needs a schema or a plugin. Each rule is a plain yes or no on
 # the destination, method and path. Every destination the gateway is asked for
-# reaches this policy, including ones that are not in pdp.json.
+# reaches this policy, including ones that are not in pdp.yaml.
 package pdp.authz
 
 import rego.v1

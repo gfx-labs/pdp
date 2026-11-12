@@ -1,0 +1,26 @@
+# Runtime wiring only. Permissions are in policy.rego.
+version: pdp.config/v3
+revision: egress-v1
+
+transport:
+  unix_socket: /run/pdp/pdp.sock
+  socket_mode: "0660"
+
+# CA that signs leaf certificates for CONNECT. Only the daemon may read the key.
+interception:
+  certificate_file: /etc/pdp/ca/tls.crt
+  key_file: /etc/pdp/ca/tls.key
+
+# Listed only because this host is relayed unread. Listing a host does not allow it.
+upstreams:
+  - host: db.internal.example.com
+    port: 5432
+    tls: tunnel
+
+credentials:
+  providers: {}
+  bindings: {}
+
+policy:
+  modules:
+    - policy.rego

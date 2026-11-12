@@ -13,6 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/goccy/go-yaml"
+	"github.com/goccy/go-yaml/ast"
+	"github.com/goccy/go-yaml/parser"
 
 	"github.com/gfx-labs/pdp/pkg/credential"
 	"github.com/gfx-labs/pdp/pkg/policy"
@@ -156,16 +161,51 @@ func resolve(base, path string) string {
 	return filepath.Join(base, path)
 }
 
-// decode accepts only strict JSON. Duration conversion is limited to typed
-// runtime limits, never arbitrary provider parameters or authored policy data.
+// plainYAML rejects the YAML features that let one written value appear in
+// several places or change type, so the file reads the way it is applied.
+type plainYAML struct{ rejected bool }
+
+func (p *plainYAML) Visit(node ast.Node) ast.Visitor {
+	switch node.(type) {
+	case *ast.AnchorNode, *ast.AliasNode, *ast.MergeKeyNode, *ast.TagNode:
+		p.rejected = true
+	}
+	return p
+}
+
+// decode accepts one YAML document, which includes JSON. Unknown fields and
+// duplicate keys are rejected. Duration conversion is limited to typed runtime
+// limits, never arbitrary provider parameters or authored policy data.
 func decode(data []byte, target any) error {
-	raw, err := schema.DecodeJSON(data)
+	if !utf8.Valid(data) {
+		return errors.New("invalid configuration encoding")
+	}
+	file, err := parser.ParseBytes(data, 0)
+	if err != nil || len(file.Docs) != 1 || file.Docs[0].Body == nil {
+		return errors.New("configuration must be one YAML or JSON document")
+	}
+	plain := &plainYAML{}
+	ast.Walk(plain, file.Docs[0])
+	if plain.rejected {
+		return errors.New("configuration must not use YAML anchors, aliases, merge keys or tags")
+	}
+	var document any
+	if err = yaml.NodeToValue(file.Docs[0].Body, &document, yaml.Strict()); err != nil {
+		return errors.New("invalid configuration document")
+	}
+	// Re-reading as strict JSON gives every later step one value model and
+	// refuses what JSON cannot carry, such as NaN.
+	encoded, err := json.Marshal(document)
 	if err != nil {
-		return errors.New("invalid configuration JSON")
+		return errors.New("invalid configuration value")
+	}
+	raw, err := schema.DecodeJSON(encoded)
+	if err != nil {
+		return errors.New("invalid configuration value")
 	}
 	root, ok := raw.(map[string]any)
 	if !ok {
-		return errors.New("configuration must be a JSON object")
+		return errors.New("configuration must be an object")
 	}
 	for _, path := range [][]string{{"limits", "request_timeout"}, {"limits", "stream_timeout"}, {"credentials", "limits", "timeout"}, {"credentials", "limits", "expiry_margin"}} {
 		if err := normalizeDuration(root, path); err != nil {
@@ -174,7 +214,7 @@ func decode(data []byte, target any) error {
 	}
 	b, err := json.Marshal(raw)
 	if err != nil {
-		return errors.New("invalid configuration JSON")
+		return errors.New("invalid configuration value")
 	}
 	jd := json.NewDecoder(bytes.NewReader(b))
 	jd.DisallowUnknownFields()

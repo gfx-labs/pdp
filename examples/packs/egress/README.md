@@ -2,12 +2,14 @@
 
 Default-deny egress for named Unix UIDs, with no credentials and no schema. Each rule is a yes or no on host, port, method and protocol. Use this for a destination nobody has written a schema for.
 
-`pdp.json` lists one upstream only because that host is tunnelled. Every other destination a caller asks for still reaches `policy.rego`, which is the only allowlist.
+This pack's configuration is YAML, to show the format. The other packs use JSON, and both load the same way.
+
+`pdp.yaml` lists one upstream only because that host is tunnelled. Every other destination a caller asks for still reaches `policy.rego`, which is the only allowlist.
 
 ## Edit
 
 - `policy.rego`: `allowed_uids`, `readable_hosts`, `open_hosts` and `tunnels`.
-- `pdp.json`: `transport.unix_socket`, the `interception` CA paths, and the tunnelled upstream.
+- `pdp.yaml`: `transport.unix_socket`, the `interception` CA paths, and the tunnelled upstream.
 
 ## Interception CA
 
@@ -20,9 +22,9 @@ The tunnelled upstream is relayed unread. The client sees the real server certif
 ## Check
 
 ```sh
-bin/pdp validate --config examples/packs/egress/pdp.json
+bin/pdp validate --config examples/packs/egress/pdp.yaml
 for input in examples/packs/egress/explain/*.json; do
-  bin/pdp explain --config examples/packs/egress/pdp.json --input "$input"
+  bin/pdp explain --config examples/packs/egress/pdp.yaml --input "$input"
 done
 ```
 
@@ -36,7 +38,7 @@ done
 ## Serve and call
 
 ```sh
-bin/pdp serve --config /etc/pdp/pdp.json
+bin/pdp serve --config /etc/pdp/pdp.yaml
 bin/pdp request --socket /run/pdp/pdp.sock --url https://pypi.org/simple/requests/
 ```
 

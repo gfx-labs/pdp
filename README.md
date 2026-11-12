@@ -9,7 +9,7 @@ Any HTTP destination can be reached. Rego is the only allowlist. A destination t
 | Part | Written in | Does |
 | --- | --- | --- |
 | Policy | Rego, package `pdp.authz` | Decides who may send what to which destination. This is the only place permissions are defined. |
-| Runtime configuration | JSON, `pdp.config/v3` | Wiring: listeners, interception CA, DNS steering, upstream entries, schema files, credential bindings, secret paths, policy files. No permissions. |
+| Runtime configuration | YAML or JSON, `pdp.config/v3` | Wiring: listeners, interception CA, DNS steering, upstream entries, schema files, credential bindings, secret paths, policy files. No permissions. |
 | Upstream entry | Part of the configuration | Attaches a credential binding, a schema, a TLS mode or token paths to one host and port. It does not allow anything. |
 | Schema | OpenAPI JSON or GraphQL SDL | Optional. Makes Go validate a request strictly and turn it into operations and fields for the policy. |
 | Credential adapter | Starlark | Obtains the provider credential after the policy allows. |

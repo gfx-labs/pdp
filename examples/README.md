@@ -20,13 +20,15 @@ A pack is a complete, runnable configuration in one directory. Copy it, edit the
 | File | Purpose |
 | --- | --- |
 | `policy.rego` | The authorization policy. Allowed callers, repositories or issues are sets at the top of the file. |
-| `pdp.json` | Runtime wiring: listeners, upstreams, schema file, credential bindings, secret paths. An upstream entry attaches a credential, schema or TLS mode to a host. It does not allow the host. Only `policy.rego` does. |
+| `pdp.json` or `pdp.yaml` | Runtime wiring: listeners, upstreams, schema file, credential bindings, secret paths. An upstream entry attaches a credential, schema or TLS mode to a host. It does not allow the host. Only `policy.rego` does. |
 | `adapter.star` | Starlark that obtains the provider credential after the policy allows. |
 | `github-rest.json`, `linear.graphql` | The pinned request schema. Its digest is checked in `policy.rego`. |
 | `requests/` | Request bodies for `pdp request`, in packs that send one. |
 | `explain/` | Trusted inputs for `pdp explain`, to check the policy without serving. The Linear and systemd packs have none. |
 
-All paths in `pdp.json` except secrets and the socket are relative to the pack, so the directory can be moved as a unit.
+The configuration can be JSON or YAML with the same fields. The egress pack uses YAML and the others use JSON.
+
+All paths in the configuration except secrets and the socket are relative to the pack, so the directory can be moved as a unit.
 
 ## Use a pack
 

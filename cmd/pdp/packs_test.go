@@ -287,13 +287,33 @@ func providerCertificate(t *testing.T, hosts ...string) (tls.Certificate, []byte
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
+// packConfig is the pack's one configuration file, pdp.yaml or pdp.json.
+func packConfig(t *testing.T, name string) string {
+	t.Helper()
+	var matches []string
+	for _, file := range []string{"pdp.yaml", "pdp.yml", "pdp.json"} {
+		if path := filepath.Join(packRoot, name, file); fileExists(path) {
+			matches = append(matches, path)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("pack %s needs exactly one pdp.yaml or pdp.json, found %v", name, matches)
+	}
+	return matches[0]
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // These packs need a Workload API, systemd, an interception CA or a cluster to
 // serve, so this checks what can be checked offline: they load, and each
 // documented explain input gets the decision its README states.
 func TestDeploymentPacksValidate(t *testing.T) {
 	t.Setenv("CREDENTIALS_DIRECTORY", "/run/credentials/pdp.service")
 	for _, name := range []string{"github-spiffe", "systemd", "egress", "subscription", "kubernetes"} {
-		if err := run([]string{"validate", "--config", filepath.Join(packRoot, name, "pdp.json")}, io.Discard, io.Discard); err != nil {
+		if err := run([]string{"validate", "--config", packConfig(t, name)}, io.Discard, io.Discard); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
@@ -313,7 +333,7 @@ func TestDeploymentPacksValidate(t *testing.T) {
 	} {
 		var out bytes.Buffer
 		pack, _, _ := strings.Cut(input, "/")
-		if err := run([]string{"explain", "--config", filepath.Join(packRoot, pack, "pdp.json"), "--input", filepath.Join(packRoot, input)}, &out, io.Discard); err != nil {
+		if err := run([]string{"explain", "--config", packConfig(t, pack), "--input", filepath.Join(packRoot, input)}, &out, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 		var decision struct {

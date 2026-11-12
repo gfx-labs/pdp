@@ -2,7 +2,11 @@
 
 ## File contract
 
-The runtime configuration is one JSON document with `"version": "pdp.config/v3"` and a nonempty `revision` that contains no CR, LF or NUL. A `pdp.config/v2` file is rejected, and so is YAML. The loader also rejects unknown fields (including the removed `routes`), duplicate object keys, trailing data, invalid UTF-8 and a non-object root. `pdp validate`, `pdp explain` and `pdp serve` read `pdp.json` in the working directory unless `--config` names another file.
+The runtime configuration is one YAML or JSON document with `version: pdp.config/v3` and a nonempty `revision` that contains no CR, LF or NUL. Both formats have the same fields and go through one loader, which decodes with `goccy/go-yaml`. The format is taken from the content, not the file extension. A `pdp.config/v2` file is rejected. The loader also rejects unknown fields (including the removed `routes`), duplicate keys, trailing data, an empty file, invalid UTF-8 and a non-object root.
+
+In YAML the loader additionally rejects more than one document, anchors, aliases, merge keys and tags, so each value is written where it applies. Quote strings that YAML would read as another type: `socket_mode: "0660"` is a string, while unquoted `0660` is a number and is rejected. The examples in this document are JSON. The [egress pack](../examples/packs/egress/pdp.yaml) is YAML.
+
+`pdp validate`, `pdp explain` and `pdp serve` take `--config FILE`. Without it they read `pdp.yaml`, `pdp.yml` or `pdp.json` from the working directory. If more than one of those exists the command fails and asks for `--config`. No other directory is searched. `pdp serve` resolves the file once at startup and rereads that same file on `SIGHUP`.
 
 Paths in the file (`ca_file`, `unix_socket`, `interception` files, schema files, `script_file`, policy modules and data, `state_file`, secret `file` and `credentials_directory`) are relative to the directory of the configuration file, not the working directory. Never put credentials in the file, in an adapter, or in policy data.
 

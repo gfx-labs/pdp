@@ -63,19 +63,24 @@ func sameRuntime(a, b config.Config) bool {
 func serveCommand(args []string, out, errout io.Writer) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(errout)
-	path := fs.String("config", "pdp.json", "administrator configuration file")
+	configFlag := fs.String("config", "", configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return errors.New("serve accepts no positional arguments")
 	}
+	// Resolved once, so a reload reads the file the daemon started from.
+	path, err := configPath(*configFlag)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
-	l, err := config.Load(ctx, *path)
+	l, err := config.Load(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -227,7 +232,7 @@ func serveCommand(args []string, out, errout io.Writer) error {
 			}
 			return nil
 		case <-hup:
-			next, err := config.Load(ctx, *path)
+			next, err := config.Load(ctx, path)
 			if err != nil {
 				logger.Print(`{"event":"reload_rejected","reason":"invalid_configuration"}`)
 				continue

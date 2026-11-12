@@ -8,6 +8,7 @@ import (
 	"flag"
 	"io"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -96,17 +97,45 @@ func steeredNames(c config.Config) []string {
 	return slices.Compact(names)
 }
 
+const configFlagUsage = "administrator configuration file, YAML or JSON (default: pdp.yaml, pdp.yml or pdp.json in the working directory)"
+
+// configPath returns the named file, or the one default file present in the
+// working directory. Two default files are refused instead of ranked, so an
+// administrator cannot edit one while the daemon reads the other.
+func configPath(named string) (string, error) {
+	if named != "" {
+		return named, nil
+	}
+	var found []string
+	for _, name := range []string{"pdp.yaml", "pdp.yml", "pdp.json"} {
+		if _, err := os.Stat(name); err == nil {
+			found = append(found, name)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		return "", errors.New("no pdp.yaml, pdp.yml or pdp.json in the working directory, use --config")
+	}
+	return "", errors.New("more than one of pdp.yaml, pdp.yml and pdp.json exists, use --config")
+}
+
 func validateCommand(args []string, out, errout io.Writer) error {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.SetOutput(errout)
-	path := fs.String("config", "pdp.json", "administrator configuration file")
+	configFlag := fs.String("config", "", configFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return errors.New("validate accepts no positional arguments")
 	}
-	l, err := config.Load(context.Background(), *path)
+	path, err := configPath(*configFlag)
+	if err != nil {
+		return err
+	}
+	l, err := config.Load(context.Background(), path)
 	if err != nil {
 		return err
 	}
@@ -139,7 +168,7 @@ func validateCommand(args []string, out, errout io.Writer) error {
 func explainCommand(args []string, out, errout io.Writer) error {
 	fs := flag.NewFlagSet("explain", flag.ContinueOnError)
 	fs.SetOutput(errout)
-	path := fs.String("config", "pdp.json", "administrator configuration file")
+	configFlag := fs.String("config", "", configFlagUsage)
 	inputPath := fs.String("input", "", "trusted pdp.authz/v2 input JSON file")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -147,7 +176,11 @@ func explainCommand(args []string, out, errout io.Writer) error {
 	if fs.NArg() != 0 || *inputPath == "" {
 		return errors.New("usage: pdp explain --config FILE --input FILE")
 	}
-	l, err := config.Load(context.Background(), *path)
+	path, err := configPath(*configFlag)
+	if err != nil {
+		return err
+	}
+	l, err := config.Load(context.Background(), path)
 	if err != nil {
 		return err
 	}
