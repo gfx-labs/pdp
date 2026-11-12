@@ -2,7 +2,7 @@
 
 Default-deny egress for named Unix UIDs, with no credentials and no schema. Each rule is a yes or no on host, port, method and protocol. Use this for a destination nobody has written a schema for.
 
-This pack's configuration is YAML, to show the format. The other packs use JSON, and both load the same way.
+This pack's configuration and explain inputs are YAML, to show the format. The other packs use JSON, and both load the same way.
 
 `pdp.yaml` lists one upstream only because that host is tunnelled. Every other destination a caller asks for still reaches `policy.rego`, which is the only allowlist.
 
@@ -23,17 +23,17 @@ The tunnelled upstream is relayed unread. The client sees the real server certif
 
 ```sh
 bin/pdp validate --config examples/packs/egress/pdp.yaml
-for input in examples/packs/egress/explain/*.json; do
+for input in examples/packs/egress/explain/*.yaml; do
   bin/pdp explain --config examples/packs/egress/pdp.yaml --input "$input"
 done
 ```
 
 | Input | Result |
 | --- | --- |
-| `read-package.json` | allowed, `*.githubusercontent.com` is readable |
-| `post-to-read-only-host.json` | denied, `pypi.org` is read-only |
-| `resolves-to-metadata.json` | denied, an allowed name resolved to a link-local address |
-| `database-tunnel.json` | allowed, the tunnel is listed |
+| `read-package.yaml` | allowed, `*.githubusercontent.com` is readable |
+| `post-to-read-only-host.yaml` | denied, `pypi.org` is read-only |
+| `resolves-to-metadata.yaml` | denied, an allowed name resolved to a link-local address |
+| `database-tunnel.yaml` | allowed, the tunnel is listed |
 
 ## Serve and call
 

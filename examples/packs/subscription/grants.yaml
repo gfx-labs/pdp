@@ -1,0 +1,8 @@
+# Which verified caller may use which credential binding.
+# policy.rego reads this as data.run_grants. PDP gives it no other meaning.
+run_grants:
+  uid:1000:
+    - team-account
+  uid:1001:
+    - team-account
+    - personal-account

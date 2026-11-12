@@ -26,7 +26,7 @@ A pack is a complete, runnable configuration in one directory. Copy it, edit the
 | `requests/` | Request bodies for `pdp request`, in packs that send one. |
 | `explain/` | Trusted inputs for `pdp explain`, to check the policy without serving. The Linear and systemd packs have none. |
 
-The configuration can be JSON or YAML with the same fields. The egress pack uses YAML and the others use JSON.
+The configuration, policy data, OpenAPI schemas and explain inputs can each be JSON or YAML with the same fields. The egress pack uses YAML for its configuration and explain inputs, and the subscription pack uses YAML for `grants.yaml`. The rest are JSON.
 
 All paths in the configuration except secrets and the socket are relative to the pack, so the directory can be moved as a unit.
 

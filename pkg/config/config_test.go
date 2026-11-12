@@ -226,9 +226,13 @@ func TestLoadRejectsLegacyAndMalformedConfiguration(t *testing.T) {
 
 // A YAML file is the same configuration as its JSON form: block style,
 // comments and duration strings load, and paths still resolve from the file.
+// The policy data file it names may be YAML too.
 func TestLoadYAMLConfiguration(t *testing.T) {
 	f := newFixture(t)
-	path := f.write(t, "pdp.yaml", "# administrator notes\n"+f.yaml()+"limits:\n  request_timeout: 7s\n  max_concurrent: 3\n")
+	f.write(t, "authz.rego", "package pdp.authz\n\nimport rego.v1\n\ndefault allow := false\n\nallow if input.identity.id in data.run_grants.readers\n")
+	f.write(t, "grants.yaml", "# who may read\nrun_grants:\n  readers:\n    - uid:123\n")
+	document := strings.Replace(f.yaml(), "    - authz.rego\n", "    - authz.rego\n  data:\n    - grants.yaml\n", 1)
+	path := f.write(t, "pdp.yaml", "# administrator notes\n"+document+"limits:\n  request_timeout: 7s\n  max_concurrent: 3\n")
 	loaded, err := config.Load(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -238,12 +242,14 @@ func TestLoadYAMLConfiguration(t *testing.T) {
 	if c.Revision != "loader-test" || c.Limits.RequestTimeout != 7*time.Second || c.Limits.MaxConcurrent != 3 || c.Transport.UnixSocket != filepath.Join(f.dir, "run/pdp.sock") {
 		t.Fatalf("YAML configuration loaded as %+v", c)
 	}
-	decision, err := loaded.Policy.Evaluate(context.Background(), policy.Input{
-		Version: policy.InputVersion, Identity: policy.Identity{ID: "uid:123"}, Protocol: policy.ProtocolHTTP,
-		Destination: policy.Destination{Scheme: "https", Host: "api.example.test", Port: 443}, HTTP: &policy.HTTPInput{Method: "GET", Path: "/"},
-	})
-	if err != nil || decision.Allow {
-		t.Fatalf("policy named by a YAML configuration did not evaluate: decision=%+v err=%v", decision, err)
+	for id, want := range map[string]bool{"uid:123": true, "uid:999": false} {
+		decision, err := loaded.Policy.Evaluate(context.Background(), policy.Input{
+			Version: policy.InputVersion, Identity: policy.Identity{ID: id}, Protocol: policy.ProtocolHTTP,
+			Destination: policy.Destination{Scheme: "https", Host: "api.example.test", Port: 443}, HTTP: &policy.HTTPInput{Method: "GET", Path: "/"},
+		})
+		if err != nil || decision.Allow != want {
+			t.Fatalf("policy reading YAML data decided %s wrongly: decision=%+v err=%v", id, decision, err)
+		}
 	}
 }
 
@@ -331,7 +337,9 @@ func TestLoadDependencyValidation(t *testing.T) {
 		"escaped duplicate data": `{"access":{"counter":1,"\u0063ounter":2}}`,
 		"non object data":        `[]`,
 		"null data":              `null`,
-		"YAML data":              "access:\n  counter: 1\n",
+		"YAML duplicate data":    "access:\n  counter: 1\n  counter: 2\n",
+		"YAML alias data":        "access: &a {counter: 1}\nother: *a\n",
+		"YAML documents data":    "access: {}\n---\naccess: {}\n",
 		"trailing data":          `{} {}`,
 		"oversized data":         strings.Repeat(" ", config.MaxPolicyBytes+1),
 	} {

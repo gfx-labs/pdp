@@ -8,7 +8,7 @@ The provider here is a stand-in (`api.provider.example`). Replace the host, toke
 
 1. The client sends `Authorization: Bearer pdp-placeholder-team-account`.
 2. PDP finds the binding with that placeholder among the upstream's `bindings`. The placeholder only picks a candidate. It proves nothing.
-3. `policy.rego` receives the candidate as `input.binding` and checks it against `grants.json` for the verified caller.
+3. `policy.rego` receives the candidate as `input.binding` and checks it against `grants.yaml` for the verified caller.
 4. If allowed, PDP drops the caller's `Authorization`, `Cookie` and any header carrying a placeholder, then sets the real token and the binding's fixed `headers` (here `X-Account-Id`).
 
 A caller who learns another account's placeholder is denied at step 3. See `explain/other-accounts-placeholder.json`.
@@ -19,7 +19,7 @@ Clients with a subscription login try to refresh their own token. `token_paths` 
 
 ## Edit
 
-- `grants.json`: which identity may use which binding.
+- `grants.yaml`: which identity may use which binding. It is policy data, so it may be YAML or JSON.
 - `pdp.json`: upstream host, `token_paths`, the token endpoint, `REPLACE_` values, secret and state paths, and the `interception` CA paths. Give each binding its own placeholder of at least 8 characters with no spaces, commas, quotes or backslashes. A placeholder is not a secret.
 - `policy.rego`: the destination host.
 

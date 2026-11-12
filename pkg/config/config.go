@@ -13,11 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf8"
-
-	"github.com/goccy/go-yaml"
-	"github.com/goccy/go-yaml/ast"
-	"github.com/goccy/go-yaml/parser"
 
 	"github.com/gfx-labs/pdp/pkg/credential"
 	"github.com/gfx-labs/pdp/pkg/policy"
@@ -161,47 +156,13 @@ func resolve(base, path string) string {
 	return filepath.Join(base, path)
 }
 
-// plainYAML rejects the YAML features that let one written value appear in
-// several places or change type, so the file reads the way it is applied.
-type plainYAML struct{ rejected bool }
-
-func (p *plainYAML) Visit(node ast.Node) ast.Visitor {
-	switch node.(type) {
-	case *ast.AnchorNode, *ast.AliasNode, *ast.MergeKeyNode, *ast.TagNode:
-		p.rejected = true
-	}
-	return p
-}
-
-// decode accepts one YAML document, which includes JSON. Unknown fields and
-// duplicate keys are rejected. Duration conversion is limited to typed runtime
-// limits, never arbitrary provider parameters or authored policy data.
+// decode accepts one YAML or JSON document. Unknown fields and duplicate keys
+// are rejected. Duration conversion is limited to typed runtime limits, never
+// arbitrary provider parameters or authored policy data.
 func decode(data []byte, target any) error {
-	if !utf8.Valid(data) {
-		return errors.New("invalid configuration encoding")
-	}
-	file, err := parser.ParseBytes(data, 0)
-	if err != nil || len(file.Docs) != 1 || file.Docs[0].Body == nil {
-		return errors.New("configuration must be one YAML or JSON document")
-	}
-	plain := &plainYAML{}
-	ast.Walk(plain, file.Docs[0])
-	if plain.rejected {
-		return errors.New("configuration must not use YAML anchors, aliases, merge keys or tags")
-	}
-	var document any
-	if err = yaml.NodeToValue(file.Docs[0].Body, &document, yaml.Strict()); err != nil {
-		return errors.New("invalid configuration document")
-	}
-	// Re-reading as strict JSON gives every later step one value model and
-	// refuses what JSON cannot carry, such as NaN.
-	encoded, err := json.Marshal(document)
+	raw, err := schema.DecodeDocument(data)
 	if err != nil {
-		return errors.New("invalid configuration value")
-	}
-	raw, err := schema.DecodeJSON(encoded)
-	if err != nil {
-		return errors.New("invalid configuration value")
+		return errors.New("configuration must be one valid YAML or JSON document")
 	}
 	root, ok := raw.(map[string]any)
 	if !ok {
@@ -258,7 +219,7 @@ func normalizeDuration(root map[string]any, path []string) error {
 func loadPolicy(base, revision string, files Policy) (policy.Config, error) {
 	c := policy.Config{Revision: revision, Modules: make(map[string]string), Data: make(map[string]any)}
 	if len(files.Modules) == 0 || len(files.Data) > 1 {
-		return c, errors.New("policy requires Rego modules and at most one JSON data file")
+		return c, errors.New("policy requires Rego modules and at most one data file")
 	}
 	remaining := int64(MaxPolicyBytes)
 	for _, path := range files.Modules {
@@ -284,14 +245,14 @@ func loadPolicy(base, revision string, files Policy) (policy.Config, error) {
 		if err != nil {
 			return c, err
 		}
-		value, err := schema.DecodeJSON(data)
+		value, err := schema.DecodeDocument(data)
 		if err != nil {
-			return c, errors.New("invalid policy data JSON")
+			return c, errors.New("policy data must be one valid YAML or JSON document")
 		}
 		var ok bool
 		c.Data, ok = value.(map[string]any)
 		if !ok {
-			return c, errors.New("policy data must be a JSON object")
+			return c, errors.New("policy data must be an object")
 		}
 	}
 	return c, nil

@@ -1,0 +1,13 @@
+# A tunnel has no http section. Policy sees host and port only.
+version: pdp.authz/v2
+identity:
+  id: uid:1000
+  auth_method: unix
+  uid: 1000
+protocol: tunnel
+destination:
+  scheme: tcp
+  host: db.internal.example.com
+  port: 5432
+  addresses:
+    - 10.0.4.20

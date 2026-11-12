@@ -62,6 +62,6 @@
   },
   "policy": {
     "modules": ["policy.rego"],
-    "data": ["grants.json"]
+    "data": ["grants.yaml"]
   }
 }

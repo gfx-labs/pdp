@@ -75,7 +75,7 @@ allow if {
 - `input.binding` is the credential that will be injected, absent when none will be. Allow a binding only for the callers that may use it.
 - On an upstream with a schema, `input.plugin` is the schema name and `input.schema_digest` its digest. Compare the digest to a reviewed value so a changed schema denies until you review it. REST requests add `input.operations` and `input.http.path_params`, `normalized_query` and `body`. GraphQL requests add `input.graphql`, one entry per selected field.
 - Without a schema the policy sees `input.http` with `method`, `path` and `query`, and nothing about the body.
-- `http.send`, `net.lookup_ip_addr` and `opa.runtime` are unavailable. Optional static data goes in one JSON file named by `policy.data` and is read as `data.<key>`.
+- `http.send`, `net.lookup_ip_addr` and `opa.runtime` are unavailable. Optional static data goes in one YAML or JSON file named by `policy.data` and is read as `data.<key>`.
 
 ## CLI
 

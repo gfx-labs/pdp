@@ -48,7 +48,7 @@ type RESTSchema struct {
 }
 
 func CompileREST(spec []byte) (*RESTSchema, error) {
-	raw, err := DecodeJSON(spec)
+	raw, err := DecodeDocument(spec)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func CompileREST(spec []byte) (*RESTSchema, error) {
 	}
 	version, _ := doc["openapi"].(string)
 	if !regexp.MustCompile(`^3\.(0|1)\.[0-9]+$`).MatchString(version) {
-		return nil, fmt.Errorf("only OpenAPI 3.0 and 3.1 JSON are supported")
+		return nil, fmt.Errorf("only OpenAPI 3.0 and 3.1 are supported")
 	}
 	if err = emptySecurity(doc); err != nil {
 		return nil, err

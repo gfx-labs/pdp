@@ -18,6 +18,7 @@ import (
 	"github.com/gfx-labs/pdp/pkg/gateway"
 	"github.com/gfx-labs/pdp/pkg/intercept"
 	"github.com/gfx-labs/pdp/pkg/policy"
+	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
 type combinedAuth struct {
@@ -169,7 +170,7 @@ func explainCommand(args []string, out, errout io.Writer) error {
 	fs := flag.NewFlagSet("explain", flag.ContinueOnError)
 	fs.SetOutput(errout)
 	configFlag := fs.String("config", "", configFlagUsage)
-	inputPath := fs.String("input", "", "trusted pdp.authz/v2 input JSON file")
+	inputPath := fs.String("input", "", "trusted pdp.authz/v2 input file, YAML or JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -189,15 +190,20 @@ func explainCommand(args []string, out, errout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	document, err := schema.DecodeDocument(data)
+	if err != nil {
+		return errors.New("authorization input must be one valid YAML or JSON document")
+	}
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		return errors.New("invalid trusted authorization input")
+	}
 	var input policy.Input
-	dec := json.NewDecoder(bytes.NewReader(data))
+	dec := json.NewDecoder(bytes.NewReader(encoded))
 	dec.DisallowUnknownFields()
 	dec.UseNumber()
 	if err := dec.Decode(&input); err != nil {
 		return errors.New("invalid trusted authorization input")
-	}
-	if err := dec.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return errors.New("authorization input must contain exactly one JSON object")
 	}
 	decision, err := l.Policy.Evaluate(context.Background(), input)
 	if err != nil {

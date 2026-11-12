@@ -8,7 +8,7 @@ package pdp.authz
 
 import rego.v1
 
-# grants.json maps a verified identity to the bindings it may use.
+# grants.yaml maps a verified identity to the bindings it may use.
 granted_bindings := object.get(data.run_grants, input.identity.id, [])
 
 default allow := false

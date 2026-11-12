@@ -1,0 +1,16 @@
+# An allowed name that resolved to the cloud metadata address.
+version: pdp.authz/v2
+identity:
+  id: uid:1000
+  auth_method: unix
+  uid: 1000
+protocol: http
+destination:
+  scheme: https
+  host: api.example.com
+  port: 443
+  addresses:
+    - 169.254.169.254
+http:
+  method: GET
+  path: /latest/meta-data/

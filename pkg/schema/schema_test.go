@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goccy/go-yaml"
+
 	"github.com/gfx-labs/pdp/pkg/schema"
 )
 
@@ -387,5 +389,36 @@ type Query{hello:String}`)); err == nil {
 	repeated += "}"
 	if _, err := s.Normalize(repeated, "", map[string]any{"text": strings.Repeat("x", 100000)}); err == nil || !strings.Contains(err.Error(), "expansion limit") {
 		t.Fatalf("repeated argument expansion unbounded: %v", err)
+	}
+}
+
+// Administrator files may be YAML. A schema rewritten as YAML must keep the
+// digest that policies pin, and a large integer ID must not be rounded.
+func TestDecodeDocumentYAMLMatchesJSON(t *testing.T) {
+	source, err := os.ReadFile("testdata/github-rest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	asYAML, err := yaml.JSONToYAML(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromJSON, err := schema.CompileREST(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromYAML, err := schema.CompileREST(asYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromYAML.Digest() != fromJSON.Digest() {
+		t.Fatalf("YAML schema digest %s differs from JSON digest %s", fromYAML.Digest(), fromJSON.Digest())
+	}
+	value, err := schema.DecodeDocument([]byte("# comment\nissue: 9007199254740993\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := value.(map[string]any)["issue"]; got != json.Number("9007199254740993") {
+		t.Fatalf("YAML integer was not kept exactly: %#v", got)
 	}
 }

@@ -8,6 +8,8 @@ In YAML the loader additionally rejects more than one document, anchors, aliases
 
 `pdp validate`, `pdp explain` and `pdp serve` take `--config FILE`. Without it they read `pdp.yaml`, `pdp.yml` or `pdp.json` from the working directory. If more than one of those exists the command fails and asks for `--config`. No other directory is searched. `pdp serve` resolves the file once at startup and rereads that same file on `SIGHUP`.
 
+The same decoder and the same YAML restrictions apply to every other document an administrator writes: the `policy.data` file, an OpenAPI schema and a `pdp explain` input. A schema has the same digest in either format. These stay as they are: Rego modules, GraphQL SDL, Starlark adapters, credential `state_file` contents, which PDP writes itself, and request bodies from callers, which are always parsed as strict JSON.
+
 Paths in the file (`ca_file`, `unix_socket`, `interception` files, schema files, `script_file`, policy modules and data, `state_file`, secret `file` and `credentials_directory`) are relative to the directory of the configuration file, not the working directory. Never put credentials in the file, in an adapter, or in policy data.
 
 Top-level fields:
@@ -23,7 +25,7 @@ Top-level fields:
 | `schemas` | Map of name to `{protocol: "rest" or "graphql", file}`. |
 | `upstreams` | Destinations that get a credential binding, a schema, a TLS mode or token paths. |
 | `credentials` | Starlark adapters and bindings, see [Credentials](#credentials). |
-| `policy` | `modules`: one or more `.rego` files. `data`: at most one JSON file. |
+| `policy` | `modules`: one or more `.rego` files. `data`: at most one YAML or JSON file. |
 
 There are no other policy fields. Identity mapping, grants, profiles, constraints, relationships and destination allowlists do not exist in the configuration. They are written in Rego.
 
@@ -165,7 +167,7 @@ Write `default allow := false`. If `allow` is undefined, evaluation reports an e
 
 The compiler removes `http.send`, `net.lookup_ip_addr` and `opa.runtime` and allows no network access. Other OPA builtins remain, including `time.now_ns`, `glob.match` and `net.cidr_contains`. There is no positive decision cache, so a policy that uses the clock is evaluated again on every request.
 
-`policy.data` may name one JSON file whose root is an object. It is loaded as OPA data, so `data.<key>` is readable from the modules. It cannot define `data.pdp.authz`. Go gives the data no meaning. All numbers in input and data keep their exact JSON spelling, so large integer IDs are not rounded.
+`policy.data` may name one YAML or JSON file whose root is an object. It is loaded as OPA data, so `data.<key>` is readable from the modules. It cannot define `data.pdp.authz`. Go gives the data no meaning. All numbers in input and data keep their exact spelling, so large integer IDs are not rounded.
 
 ### When policy runs
 
@@ -229,7 +231,7 @@ bin/pdp explain --config examples/packs/github-read/pdp.json \
   --input examples/packs/github-read/explain/other-uid.json
 ```
 
-The output has `allow`, `identity`, `protocol`, `destination`, `binding`, `schema_digest`, `revision`, `reasons`, `matched_rules` and `operations`. The explain input is a trusted `pdp.authz/v2` document supplied by the administrator, not a way to authenticate a caller. The first command prints `"allow": true` with `"matched_rules": ["repository-read"]`. The second prints `"allow": false` with the reason `caller UID is not allowed`.
+The output has `allow`, `identity`, `protocol`, `destination`, `binding`, `schema_digest`, `revision`, `reasons`, `matched_rules` and `operations`. The explain input is a trusted `pdp.authz/v2` document, YAML or JSON, supplied by the administrator, not a way to authenticate a caller. The first command prints `"allow": true` with `"matched_rules": ["repository-read"]`. The second prints `"allow": false` with the reason `caller UID is not allowed`.
 
 ### Request outcomes
 
@@ -249,7 +251,7 @@ When a streamed response has started and the credential appears in it, PDP can n
 
 ## Supported schema surface
 
-OpenAPI input is JSON, versions 3.0.x and 3.1.x, within an explicitly narrow subset. Supported REST values are scalar string, boolean, integer and number path and query parameters, and typed closed JSON request objects and arrays. Local component schema references are allowed without cycles. Unknown relevant keywords fail import. Unsupported features include polymorphism, defaults, format enforcement, external references, header and cookie parameters, array and object query parameters, callbacks, links, authentication schemes and nonempty security requirements, server variables and server base paths. Descriptions and examples are metadata, not permission evidence. Do not import an arbitrary provider OpenAPI document and assume compatibility.
+OpenAPI input is JSON or YAML, versions 3.0.x and 3.1.x, within an explicitly narrow subset. Supported REST values are scalar string, boolean, integer and number path and query parameters, and typed closed JSON request objects and arrays. Local component schema references are allowed without cycles. Unknown relevant keywords fail import. Unsupported features include polymorphism, defaults, format enforcement, external references, header and cookie parameters, array and object query parameters, callbacks, links, authentication schemes and nonempty security requirements, server variables and server base paths. Descriptions and examples are metadata, not permission evidence. Do not import an arbitrary provider OpenAPI document and assume compatibility.
 
 REST rejects percent-encoded paths, dot segments, doubled slashes, duplicate query or body keys, unknown request fields and unsupported body and content types. A matching operation ID does not authorize its values or provider-state-dependent resources.
 
