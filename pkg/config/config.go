@@ -54,6 +54,8 @@ type Limits struct {
 	MaxConcurrent    int           `json:"max_concurrent,omitempty"`
 	RequestTimeout   time.Duration `json:"request_timeout,omitempty"`
 	StreamTimeout    time.Duration `json:"stream_timeout,omitempty"`
+	// DisableUpstreamReuse opens a new upstream connection for every request.
+	DisableUpstreamReuse bool `json:"disable_upstream_reuse,omitempty"`
 }
 
 type Transport struct {

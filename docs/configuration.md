@@ -143,7 +143,14 @@ The Unix socket and SPIFFE listeners refuse origin-form requests with `400`. Tra
 
 Inside an intercepted `CONNECT`, a first byte of `0x16` starts TLS with a leaf for the `CONNECT` host. Anything else is read as plain HTTP with scheme `http`. Each request inside is authenticated and authorized on its own, against the snapshot that is current when that request starts.
 
-Everything is HTTP/1.1. HTTP/2 is not offered to callers, and upstream connections negotiate `http/1.1` only. Each upstream request uses a fresh connection.
+Everything is HTTP/1.1. HTTP/2 is not offered to callers, and upstream connections negotiate `http/1.1` only.
+
+Upstream connections are reused. An idle one is kept for 30 seconds, at most `max_concurrent` per destination host and port, and all are closed on reload. Two consequences follow:
+
+- A request may travel on a connection opened for an earlier request to the same host and port, possibly from another caller. It goes to the address resolved when that connection was opened. Policy still runs on every request with the addresses resolved for it, but an address rule is enforced when a connection is opened, not on each request that reuses it.
+- If a reused connection fails before the upstream answers, Go's transport sends the request once more on a new connection. This applies to `GET`, `HEAD`, `OPTIONS` and `TRACE` without a body, and to any bodiless request the caller marked with `Idempotency-Key` or `X-Idempotency-Key`. A request with a body is never sent twice.
+
+Set `limits.disable_upstream_reuse` to `true` to open a new connection for every request. Then neither applies, and every request pays for a TCP and TLS handshake.
 
 **Schema-backed upstreams** keep the strict handling of the earlier route-based gateway. The method must be GET, HEAD, POST, PUT, PATCH or DELETE. The request is validated against the pinned schema and refused with `400` before policy on any ambiguity: encoded or dot paths, doubled slashes, duplicate query keys, unknown body fields, non-JSON bodies, compression, upgrades or trailers. PDP builds a fresh request with only `Accept`, `Accept-Encoding: identity`, `User-Agent`, `Content-Type`, the binding's fixed `headers` and the credential, so no caller header is forwarded. The response must be a 2xx, 4xx or 5xx JSON body within `max_response_bytes`, without compression. A redirect is refused as `invalid_upstream_response`. The body is buffered, scanned for the credential, and returned with locally built headers. A GraphQL upstream accepts only POST to its `graphql_path` and refuses subscriptions and batches.
 
@@ -174,7 +181,7 @@ The compiler removes `http.send`, `net.lookup_ip_addr` and `opa.runtime` and all
 For a destination given by name, policy runs twice:
 
 1. Before DNS resolution, without `destination.addresses`. A deny ends the request. The name is never looked up, so a caller cannot send data out through lookups of refused names.
-2. After resolution, with `destination.addresses` set to the addresses PDP will dial (at most 16). PDP then dials only those addresses, so a second DNS answer cannot move the request.
+2. After resolution, with `destination.addresses` set to the addresses PDP will dial (at most 16). A new connection is dialed only to those addresses, so a second DNS answer cannot move it. A request that reuses an open connection goes to the address that connection was dialed to, see [request forms and handling](#request-forms-and-handling).
 
 For an IP literal only the second evaluation runs. A request to a `token_paths` entry dials nothing and is evaluated once, without addresses. A rule that refuses address ranges must therefore allow the first evaluation, where `addresses` is absent. Checking only the addresses that are present does this, as the `egress` pack does.
 
@@ -276,6 +283,7 @@ The schemas under `examples/packs/*/` are request projections taken from pinned 
 | Open connections per listener, open intercepted `CONNECT`s | 2 × `max_concurrent` | Follows `max_concurrent` |
 | Schema-backed exchange, wait for upstream response headers | 15 s | `limits.request_timeout`, 1 ms to 1 min |
 | Streamed response, WebSocket, tunnel | 10 min | `limits.stream_timeout`, from `request_timeout` to 24 h |
+| Upstream connection reuse | On, idle for 30 s | `limits.disable_upstream_reuse` |
 | Header read / idle connection | 5 s / 30 s | Fixed |
 | Resolved addresses per destination | 16 | Fixed |
 | Cached interception leaves | 1024 | Fixed |

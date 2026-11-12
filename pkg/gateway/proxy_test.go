@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -276,6 +277,52 @@ func TestStreamedResponse(t *testing.T) {
 	events := h.audit()
 	if last := events[len(events)-1]; last.Outcome != "credential_reflected" || last.Status != 502 {
 		t.Fatalf("reflection audit: %+v", last)
+	}
+}
+
+// Reads share an upstream connection. A write with a body that the upstream
+// dropped on that connection is not sent again.
+func TestUpstreamReuse(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		var mu sync.Mutex
+		connections := map[string]bool{}
+		writes := 0
+		h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			connections[r.RemoteAddr] = true
+			if r.Method == "POST" {
+				writes++
+			}
+			mu.Unlock()
+			if r.Method == "POST" {
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err == nil {
+					conn.Close()
+				}
+				return
+			}
+			io.WriteString(w, "ok")
+		}, true, Options{DisableUpstreamReuse: disabled})
+		for range 3 {
+			if status, _, body := h.request(t, "GET", "/read", "", http.Header{}); status != 200 || body != "ok" {
+				t.Fatalf("disabled=%v read: %d %q", disabled, status, body)
+			}
+		}
+		mu.Lock()
+		want := 1
+		if disabled {
+			want = 3
+		}
+		if len(connections) != want {
+			t.Fatalf("disabled=%v: %d upstream connections for 3 reads, want %d", disabled, len(connections), want)
+		}
+		mu.Unlock()
+		status, _, _ := h.request(t, "POST", "/write", `{"a":1}`, http.Header{"Idempotency-Key": {"k1"}})
+		mu.Lock()
+		if status != 502 || writes != 1 {
+			t.Fatalf("disabled=%v: dropped write status=%d, upstream saw it %d times", disabled, status, writes)
+		}
+		mu.Unlock()
 	}
 }
 

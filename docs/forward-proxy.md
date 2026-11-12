@@ -54,7 +54,7 @@ Policy is evaluated twice for a destination given by name:
 1. Before DNS resolution, with no `addresses`. A denied name is never looked up.
 2. After resolution, with `destination.addresses` set to the addresses PDP will dial, at most 16.
 
-The dial is pinned to those addresses, so a second DNS answer cannot move the request. A rule can refuse loopback, link-local and cluster ranges. An IP literal skips the first evaluation. A token path request dials nothing and is evaluated once without addresses.
+A new connection is dialed only to those addresses, so a second DNS answer cannot move it. A request that reuses an open upstream connection goes to the address that connection was dialed to, unless `limits.disable_upstream_reuse` is set. A rule can refuse loopback, link-local and cluster ranges. An IP literal skips the first evaluation. A token path request dials nothing and is evaluated once without addresses.
 
 A boolean rule for a destination nobody has modelled:
 

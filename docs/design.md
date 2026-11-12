@@ -38,12 +38,12 @@ Every connecting UID, every workload the bundle verifies and every address that 
 7. Resolve the host, evaluate again with `destination.addresses`, and pin the dial to those addresses.
 8. Only after `allow`, acquire the credential for the candidate binding.
 9. Build the upstream request. On a schema-backed upstream it is a fresh request with no caller headers. Otherwise caller headers are kept minus hop-by-hop headers, and with a credential minus `Authorization`, `Cookie`, the adapter's header and any header carrying the placeholder. Apply the binding's fixed `headers` and the credential.
-10. Send it over a fresh HTTP/1.1 connection. Return a buffered JSON response for a schema-backed upstream, or relay the response, WebSocket or tunnel as a stream. Scan for the credential.
+10. Send it over HTTP/1.1, on a reused upstream connection when one is idle. Return a buffered JSON response for a schema-backed upstream, or relay the response, WebSocket or tunnel as a stream. Scan for the credential.
 11. Emit an audit event with the snapshot, principal, destination, binding, policy revision, schema digest, matched rules, outcome and byte counts.
 
 A `token_paths` request stops after step 6: it is answered locally with the placeholder and never sent upstream. A `CONNECT` to a tunnel upstream is authorized once with `protocol: "tunnel"` and relayed unread. Any other `CONNECT` is intercepted, and each request inside goes through these steps.
 
-Redirects are never followed. Mutating requests are not retried. Concurrency and all deadlines are bounded. Bodies are bounded on schema-backed upstreams. Streams are bounded by `stream_timeout`.
+Redirects are never followed. A request with a body is never sent twice. A bodiless read may be resent once when a reused connection fails, see [configuration](configuration.md#request-forms-and-handling). Concurrency and all deadlines are bounded. Bodies are bounded on schema-backed upstreams. Streams are bounded by `stream_timeout`.
 
 Out of scope: a credential-return endpoint, response-field filtering, HTTP/2, DNS over TCP, a browser consent UI, a multi-tenant admin platform, request-path schema introspection.
 

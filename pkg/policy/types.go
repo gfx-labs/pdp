@@ -22,7 +22,8 @@ type Identity struct {
 }
 
 // Destination is where the gateway will connect. Host is lower case without a
-// trailing dot. Addresses are the exact addresses it will dial. They are absent
+// trailing dot. Addresses are the ones resolved for this request, and the only
+// ones a new connection is dialed to. They are absent
 // on the evaluation that runs before a DNS lookup.
 type Destination struct {
 	Scheme    string   `json:"scheme"`

@@ -158,7 +158,9 @@ func (x *exchange) request(identity auth.Identity, dest destination) {
 		return
 	}
 	// "Connection: close" beside "Connection: Upgrade" would refuse the upgrade.
-	out.Close, out.GetBody = input.Protocol != policy.ProtocolWebSocket, nil
+	// A nil GetBody keeps Transport from resending a request that has a body.
+	// It still resends a bodiless one when the caller sent an Idempotency-Key.
+	out.Close, out.GetBody = g.opts.DisableUpstreamReuse && input.Protocol != policy.ProtocolWebSocket, nil
 	if chosen != nil {
 		// Every field that could carry the caller's own or placeholder
 		// credential is replaced, not only the one the adapter sets.

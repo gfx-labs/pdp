@@ -214,6 +214,10 @@ type Options struct {
 	RequestTimeout time.Duration
 	// StreamTimeout bounds a relayed response, WebSocket or tunnel.
 	StreamTimeout time.Duration
+	// DisableUpstreamReuse opens a new upstream connection for every request.
+	// With reuse, a request may travel on a connection dialed for an earlier
+	// request to the same host and port, to the address resolved back then.
+	DisableUpstreamReuse bool
 	// RootCAs supplies explicit trust for private HTTPS upstreams. Nil uses system roots.
 	RootCAs *x509.CertPool
 	// Interception signs leaf certificates for CONNECT and transparent TLS.
@@ -312,14 +316,17 @@ func New(s *Snapshot, o Options) (*Gateway, error) {
 	if o.RootCAs != nil {
 		g.roots = o.RootCAs.Clone()
 	}
-	// A fresh HTTP/1 connection per request prevents Transport's reused-connection retries.
+	// Reused connections let Transport resend a request the upstream may not have
+	// seen. It does that only for bodiless GET, HEAD, OPTIONS and TRACE, because
+	// request sets GetBody to nil. HTTP/2 stays off.
 	g.transport = &http.Transport{
 		Proxy: nil, DialContext: g.dialPinned,
 		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: g.roots, NextProtos: []string{"http/1.1"}},
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
 		TLSHandshakeTimeout: o.RequestTimeout, ResponseHeaderTimeout: o.RequestTimeout,
 		MaxResponseHeaderBytes: int64(o.MaxHeaderBytes), DisableCompression: true,
-		DisableKeepAlives: true, MaxConnsPerHost: o.MaxConcurrent, ForceAttemptHTTP2: false,
+		DisableKeepAlives: o.DisableUpstreamReuse, MaxConnsPerHost: o.MaxConcurrent, ForceAttemptHTTP2: false,
+		MaxIdleConns: 2 * o.MaxConcurrent, MaxIdleConnsPerHost: o.MaxConcurrent, IdleConnTimeout: 30 * time.Second,
 	}
 	g.current.Store(s)
 	return g, nil
@@ -379,6 +386,8 @@ func (g *Gateway) Reload(s *Snapshot) error {
 	if old != s {
 		old.retire()
 	}
+	// Connections the old snapshot's policy approved are not kept for the new one.
+	g.transport.CloseIdleConnections()
 	return nil
 }
 func (g *Gateway) Metrics() Metrics {

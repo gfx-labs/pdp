@@ -76,7 +76,7 @@ func snapshot(l *config.Loaded, a auth.Authenticator) (*gateway.Snapshot, error)
 // validation must work without that deployment secret.
 func gatewayOptions(l *config.Loaded, serving bool) (gateway.Options, error) {
 	x := l.Config.Limits
-	o := gateway.Options{MaxRequestBytes: x.MaxRequestBytes, MaxResponseBytes: x.MaxResponseBytes, MaxHeaderBytes: x.MaxHeaderBytes, MaxConcurrent: x.MaxConcurrent, RequestTimeout: x.RequestTimeout, StreamTimeout: x.StreamTimeout, RootCAs: l.RootCAs}
+	o := gateway.Options{MaxRequestBytes: x.MaxRequestBytes, MaxResponseBytes: x.MaxResponseBytes, MaxHeaderBytes: x.MaxHeaderBytes, MaxConcurrent: x.MaxConcurrent, RequestTimeout: x.RequestTimeout, StreamTimeout: x.StreamTimeout, DisableUpstreamReuse: x.DisableUpstreamReuse, RootCAs: l.RootCAs}
 	if i := l.Config.Interception; i != nil && serving {
 		authority, err := intercept.Load(i.CertificateFile, i.KeyFile)
 		if err != nil {
