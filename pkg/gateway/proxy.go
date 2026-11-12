@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/gfx-labs/pdp/pkg/credential"
 	"github.com/gfx-labs/pdp/pkg/policy"
 	"github.com/gfx-labs/pdp/pkg/schema"
+	"github.com/valyala/bytebufferpool"
 )
 
 // candidate picks the binding a request may receive. A placeholder only
@@ -259,6 +261,11 @@ func headersCarrySecret(h http.Header, lease credential.Result) bool {
 	return false
 }
 
+const streamBufferSize = 32 << 10
+
+// streamBuffers is private so its size calibration sees only relay buffers.
+var streamBuffers bytebufferpool.Pool
+
 // respondStream relays a response as it arrives. With an injected credential
 // the bytes are scanned on the way, and a match ends the connection.
 func (x *exchange) respondStream(response *http.Response, credentialed bool, lease credential.Result) {
@@ -278,7 +285,14 @@ func (x *exchange) respondStream(response *http.Response, credentialed bool, lea
 	x.w.WriteHeader(x.status)
 	controller := http.NewResponseController(x.w)
 	scanner := lease.Scanner()
-	buffer := make([]byte, 32<<10)
+	pooled := streamBuffers.Get()
+	pooled.B = slices.Grow(pooled.B[:0], streamBufferSize)[:streamBufferSize]
+	buffer := pooled.B
+	// Runs on the abort panics too. Cleared so no response bytes outlive the request.
+	defer func() {
+		clear(buffer)
+		streamBuffers.Put(pooled)
+	}()
 	for {
 		n, err := response.Body.Read(buffer)
 		chunk := buffer[:n]

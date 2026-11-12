@@ -6,6 +6,7 @@ require (
 	github.com/goccy/go-yaml v1.19.2
 	github.com/open-policy-agent/opa v1.22.2
 	github.com/spiffe/go-spiffe/v2 v2.9.0
+	github.com/valyala/bytebufferpool v1.0.0
 	github.com/vektah/gqlparser/v2 v2.5.64
 	go.starlark.net v0.0.0-20261021141710-4f4267fb140d
 	golang.org/x/net v0.62.0
