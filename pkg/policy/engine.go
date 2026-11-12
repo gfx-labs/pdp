@@ -130,26 +130,18 @@ func (e *Engine) Evaluate(ctx context.Context, input Input) (Decision, error) {
 			}
 		}
 	}
-	b, err := json.Marshal(input)
-	if err != nil {
-		d.Reasons = append(d.Reasons, "invalid input values")
-		return d, fmt.Errorf("encode policy input: %w", err)
-	}
-	var frozen Input
-	if err := decodeJSON(b, &frozen); err != nil {
-		return d, fmt.Errorf("decode policy input: %w", err)
-	}
-	d.Identity = frozen.Identity
-	d.Operations, err = operationDetails(frozen)
+	operations, err := operationDetails(input)
 	if err != nil {
 		d.Reasons = append(d.Reasons, err.Error())
 		return d, nil
 	}
-	var regoInput map[string]any
-	if err := decodeJSON(b, &regoInput); err != nil {
-		return d, fmt.Errorf("decode policy input: %w", err)
+	d.Operations = operations
+	regoInput, err := inputValue(input)
+	if err != nil {
+		d.Reasons = append(d.Reasons, "invalid input values")
+		return d, fmt.Errorf("encode policy input: %w", err)
 	}
-	results, err := e.query.Eval(ctx, rego.EvalInput(regoInput))
+	results, err := e.query.Eval(ctx, rego.EvalParsedInput(regoInput))
 	if err != nil {
 		d.Reasons = append(d.Reasons, "policy evaluation failed")
 		return d, fmt.Errorf("evaluate policy: %w", err)
@@ -256,7 +248,7 @@ func operationDetails(input Input) ([]OperationDecision, error) {
 	}
 	for _, op := range input.Operations {
 		if !fields[op.ID] {
-			out = append(out, OperationDecision{ID: op.ID, Resources: op.Resources})
+			out = append(out, OperationDecision{ID: op.ID, Resources: append([]Resource(nil), op.Resources...)})
 		}
 	}
 	return out, nil
