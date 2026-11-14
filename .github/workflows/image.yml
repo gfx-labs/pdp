@@ -13,7 +13,8 @@ jobs:
   image:
     # A manual run from any other branch builds nothing.
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/p7-deploy'
-    runs-on: talos-metal-gfx
+    # The repository is public, and only the public runner group admits it.
+    runs-on: talos-metal-gfx-public
     permissions:
       contents: read
       packages: write
