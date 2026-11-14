@@ -221,19 +221,14 @@ allow if {
 		t.Fatalf("relay after upgrade: %q %v", echoed, err)
 	}
 	conn.Close()
+	// The relay is audited when it ends, which is after the close above.
+	h.waitAudit(t, 1)
 	if response, _, _ = upgrade("/elsewhere"); response.StatusCode != 403 {
 		t.Fatalf("upgrade the policy does not allow: status=%d", response.StatusCode)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		events := h.audit()
-		if len(events) == 2 && events[0].Outcome == "upgraded" && events[0].BytesSent == int64(len(echoed)) && events[0].BytesReceived == int64(len(echoed)) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("upgrade audit: %+v", events)
-		}
-		time.Sleep(10 * time.Millisecond)
+	events := h.waitAudit(t, 2)
+	if len(events) != 2 || events[0].Outcome != "upgraded" || events[0].BytesSent != int64(len(echoed)) || events[0].BytesReceived != int64(len(echoed)) || events[1].Outcome != "forbidden" {
+		t.Fatalf("upgrade audit: %+v", events)
 	}
 }
 
