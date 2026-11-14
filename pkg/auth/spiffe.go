@@ -56,7 +56,8 @@ func (s *SPIFFE) Authenticate(r *http.Request) (Identity, error) {
 	if err != nil {
 		return Identity{}, ErrUnauthenticated
 	}
-	return Identity{Method: "spiffe", SPIFFEID: id.String()}, nil
+	leaf := r.TLS.PeerCertificates[0]
+	return Identity{Method: "spiffe", SPIFFEID: id.String(), NotBefore: leaf.NotBefore, NotAfter: leaf.NotAfter}, nil
 }
 
 func (s *SPIFFE) Close() error { return s.source.Close() }

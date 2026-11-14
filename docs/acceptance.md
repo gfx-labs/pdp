@@ -20,6 +20,7 @@ No real provider read or write, SPIRE deployment with the Kubernetes attestor or
 | SPIFFE verification and rotation against a local Workload API server | `TestSPIFFERotation`. This is not SPIRE. For real SPIRE see the manual run below. |
 | `pdp forward` relays a plain loopback connection over SPIFFE mTLS: the gateway listener authenticates the workload's ID, a half-closed client gets its response, a gateway with another ID is refused | `TestForwardPresentsWorkloadSVID`, local Workload API server. Not run in a pod. For curl and git through it see the manual run below. |
 | A request that fails authentication on a kept-alive connection gets `401` with `Connection: close`, and the connection is closed | `TestUnauthenticatedConnectionIsClosed` |
+| A SPIFFE connection whose certificate is in the last quarter of its validity gets its normal `200` with `Connection: close` and is then closed, for a direct request and inside an intercepted `CONNECT`, where the tunnel closes too. A fresh certificate and a Unix caller keep their connections. | `TestSPIFFEConnectionRetiresBeforeExpiry`, real TLS with SVIDs from a local Workload API server |
 | Gateway ambiguity, response boundary, TLS, reload and GraphQL occurrence tests on schema-backed upstreams | `pkg/gateway` tests |
 | A destination with no upstream entry is decided by policy and gets no credential. A denied name is never resolved. Policy sees resolved addresses and can refuse a name that resolves to loopback. | `TestUnlistedDestinationsAreDecidedByPolicy` |
 | `CONNECT` is intercepted with a CA leaf, each inner request is authorized and credentialed, an inner request naming another host is refused, and `CONNECT` without a CA is refused | `TestConnectInterception` |
@@ -109,10 +110,28 @@ Results:
 
 Two things this run found:
 
-1. **A kept-alive connection does not outlive the SVID it was opened with.** PDP verifies the client certificate again on every request, and that check includes the certificate's expiry. Renewal does not help an open connection, because TLS 1.3 has no way to present a new certificate on it. Before this run, PDP answered such a request with `401` and kept the connection open, so a client that reuses connections got `401` for every later request. In the first pass of this run, six requests in a row failed that way. PDP now sends `Connection: close` with the `401` and closes the connection. The request that meets the expiry still fails once, and curl did not retry it. With SVID lifetimes of an hour and PDP's 30 second idle timeout, a connection has to be in continuous use across the expiry for this to happen. A long transfer that is still running when the SVID expires was not tried.
+1. **A kept-alive connection does not outlive the SVID it was opened with.** PDP verifies the client certificate again on every request, and that check includes the certificate's expiry. Renewal does not help an open connection, because TLS 1.3 has no way to present a new certificate on it. Before this run, PDP answered such a request with `401` and kept the connection open, so a client that reuses connections got `401` for every later request. In the first pass of this run, six requests in a row failed that way. PDP now sends `Connection: close` with the `401` and closes the connection. In this run the request that met the expiry still failed once, and curl did not retry it. That is fixed by retiring the connection earlier, see [the second run](#second-run-connections-retired-before-expiry).
 2. **An upstream that echoes the injected credential is cut off.** The first version of the `/echo` handler returned the `Authorization` value. PDP ended that response with outcome `credential_reflected`, as designed, and curl reported an empty reply. The handler was changed to return a hash.
 
-Not covered by this run: the Kubernetes workload attestor, the SPIFFE CSI driver, a cluster, trust bundle or CA rotation, removal of a registration entry while its workload runs, the server and agent on different hosts, a real provider, `git` over the smart HTTP protocol or a push, the Go toolchain and `gh` as clients, and the container image.
+### Second run: connections retired before expiry
+
+PDP now closes a SPIFFE connection after a response once less than a quarter of its certificate's validity remains. See [Transport](configuration.md#transport). This was run once by hand on November 14, 2026 (UTC), with the same versions and the same kind of setup as above, in its own directory with its own SPIRE server and agent, trust domain `rot2.test` and 90 second SVIDs.
+
+One `curl` process sent a request every 10 seconds for 5 minutes through `pdp forward`, with connection reuse on:
+
+| Measure | Result |
+| --- | --- |
+| Requests | 31 |
+| `200` | 31 |
+| `401` | 0, in curl's output and in PDP's audit log |
+| Connections curl opened | 6. It reused a connection for 4 to 8 requests, then opened a new one after PDP closed the old one. |
+| SVID renewals logged by the agent in the whole run | 18, for the two entries together |
+
+The forwarder logged nothing. A first attempt got `403` for every request because the policy written for the run named the wrong upstream port. That was an error in the test setup, and the numbers above are from the run after it was corrected.
+
+A long transfer that is still running when the SVID expires was not tried. The response is not cut by this rule, and the certificate is not checked again until the next request.
+
+Not covered by these runs: the Kubernetes workload attestor, the SPIFFE CSI driver, a cluster, trust bundle or CA rotation, removal of a registration entry while its workload runs, the server and agent on different hosts, a real provider, `git` over the smart HTTP protocol or a push, the Go toolchain and `gh` as clients, and the container image.
 
 ## Real GitHub acceptance, pending
 

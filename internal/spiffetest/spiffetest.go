@@ -86,6 +86,12 @@ func NewCA(t *testing.T, serial int64) CA {
 // Issue returns an SVID for id and its PKCS #8 key, as the Workload API sends it.
 func (c CA) Issue(t *testing.T, id string, serial int64) (*x509svid.SVID, []byte) {
 	t.Helper()
+	return c.IssueValid(t, id, serial, time.Now().Add(-time.Minute), time.Now().Add(time.Hour))
+}
+
+// IssueValid is Issue with a chosen validity period.
+func (c CA) IssueValid(t *testing.T, id string, serial int64, notBefore, notAfter time.Time) (*x509svid.SVID, []byte) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +100,7 @@ func (c CA) Issue(t *testing.T, id string, serial int64) (*x509svid.SVID, []byte
 	if err != nil {
 		t.Fatal(err)
 	}
-	template := &x509.Certificate{SerialNumber: big.NewInt(serial), NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), URIs: []*url.URL{uri}, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}}
+	template := &x509.Certificate{SerialNumber: big.NewInt(serial), NotBefore: notBefore, NotAfter: notAfter, URIs: []*url.URL{uri}, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}}
 	der, err := x509.CreateCertificate(rand.Reader, template, c.Cert, &key.PublicKey, c.key)
 	if err != nil {
 		t.Fatal(err)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 var ErrUnauthenticated = errors.New("authentication required")
@@ -19,6 +20,9 @@ type Identity struct {
 	UID      uint32
 	SPIFFEID string
 	IP       string
+	// NotBefore and NotAfter are the validity of the verified SPIFFE
+	// certificate. They are zero for other methods and never reach policy.
+	NotBefore, NotAfter time.Time
 }
 
 // ID is the SPIFFE ID, "uid:<n>" for a Unix peer or "ip:<address>" for a

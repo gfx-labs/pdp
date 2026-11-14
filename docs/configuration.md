@@ -71,6 +71,8 @@ At least one of `unix_socket`, `spiffe` and `transparent` is required. `socket_m
 
 `spiffe.address` is a TCP listen address. `spiffe.workload_api` must start with `unix:///`. The listener requires TLS 1.3 and a client certificate that verifies against the current Workload API bundle. Session tickets are disabled. The certificate is checked again for every request, including each request inside an open `CONNECT`.
 
+A TLS 1.3 connection keeps the certificate it was opened with, so it cannot outlive that SVID. PDP therefore retires a SPIFFE connection early. Once less than a quarter of the certificate's validity period remains, every response on the connection carries `Connection: close` and PDP closes the connection after that response. Inside an intercepted `CONNECT` the tunnel is closed with it. The response itself is sent whole, however long it streams. The client's next request opens a new connection. The Workload API renews an SVID at half its lifetime, so a new connection carries a certificate with at least half its lifetime left. The rule comes from the certificate and has no setting. Unix and transparent callers are not affected. An opaque tunnel or a WebSocket is one request and is not cut by this rule: it ends at `limits.stream_timeout` or when the certificate fails verification on a later request.
+
 `transparent.http` and `transparent.https` are TCP listen addresses for DNS-steered clients. At least one is required when `transparent` is present. `https` requires `interception`, because PDP terminates TLS with a leaf for the SNI name. A caller on these listeners is identified by source address only, and is never treated as a Unix or SPIFFE caller.
 
 ### Interception
@@ -242,7 +244,7 @@ The output has `allow`, `identity`, `protocol`, `destination`, `binding`, `schem
 
 ### Request outcomes
 
-Authentication runs first. It fails with `401 unauthenticated` when the Unix peer UID cannot be read, the SPIFFE certificate does not verify, or a transparent caller has no source address. A verified caller that policy does not allow gets `403 forbidden`. A `401` carries `Connection: close` and PDP closes the connection, because a connection that failed authentication cannot pass it later. A SPIFFE connection fails this way once the SVID it was opened with expires, so a kept-alive connection lasts at most the remaining lifetime of that SVID, and the request that meets the expiry gets the `401`. Error bodies are `{"error": "<code>"}`:
+Authentication runs first. It fails with `401 unauthenticated` when the Unix peer UID cannot be read, the SPIFFE certificate does not verify, or a transparent caller has no source address. A verified caller that policy does not allow gets `403 forbidden`. A `401` carries `Connection: close` and PDP closes the connection, because a connection that failed authentication cannot pass it later. A SPIFFE connection fails this way once the SVID it was opened with expires. PDP retires a SPIFFE connection before that, see [Transport](#transport), so a `401` for expiry means the caller could not open a new connection with a renewed SVID in time. Error bodies are `{"error": "<code>"}`:
 
 | Status | Codes |
 | --- | --- |

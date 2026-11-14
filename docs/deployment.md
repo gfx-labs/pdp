@@ -102,7 +102,7 @@ Do not mount the Workload API socket into the workload container. With the socke
 
 `TestForwardPresentsWorkloadSVID` runs the forwarder against a listener built the way `serve` builds it, with a local Workload API server and a generated CA. It checks that a request arrives authenticated as the workload's SPIFFE ID, that a half-closed client gets its response, and that a gateway with another ID is refused before any request is sent. It was also run by hand with real SPIRE on one machine, with curl and `git ls-remote` as the clients. See [acceptance.md](acceptance.md#spire-run-on-one-machine). It has not been run in a pod, with the CSI driver, or with the Go toolchain or `gh` as the client.
 
-A connection through the forwarder ends when the SVID it was opened with expires. PDP answers the next request on it with `401` and closes it, and the client has to reconnect. A new connection uses the renewed SVID.
+A connection through the forwarder does not outlive the SVID it was opened with. PDP closes it after a response once less than a quarter of that certificate's validity remains, and the client reconnects. The forwarder opens the new connection with the renewed SVID. See [Transport](configuration.md#transport). The client needs nothing beyond ordinary HTTP handling of `Connection: close`.
 
 ## Interception CA
 

@@ -166,7 +166,12 @@ func (h *harness) upstream() Upstream {
 
 func (h *harness) install(t *testing.T, version string, engine *policy.Engine, credentials *credential.Manager, upstreams ...Upstream) {
 	t.Helper()
-	s, err := NewSnapshot(SnapshotConfig{Version: version, Authenticator: testAuth{}, Policy: engine, Credentials: credentials, Upstreams: upstreams})
+	h.installAuth(t, version, testAuth{}, engine, credentials, upstreams...)
+}
+
+func (h *harness) installAuth(t *testing.T, version string, authenticator auth.Authenticator, engine *policy.Engine, credentials *credential.Manager, upstreams ...Upstream) {
+	t.Helper()
+	s, err := NewSnapshot(SnapshotConfig{Version: version, Authenticator: authenticator, Policy: engine, Credentials: credentials, Upstreams: upstreams})
 	if err != nil {
 		t.Fatal(err)
 	}
