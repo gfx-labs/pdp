@@ -19,6 +19,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
+	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
+
+	"github.com/gfx-labs/pdp/internal/spiffetest"
+	"github.com/gfx-labs/pdp/pkg/auth"
 	"github.com/gfx-labs/pdp/pkg/credential"
 )
 
@@ -214,19 +221,14 @@ allow if {
 		t.Fatalf("relay after upgrade: %q %v", echoed, err)
 	}
 	conn.Close()
+	// The relay is audited when it ends, which is after the close above.
+	h.waitAudit(t, 1)
 	if response, _, _ = upgrade("/elsewhere"); response.StatusCode != 403 {
 		t.Fatalf("upgrade the policy does not allow: status=%d", response.StatusCode)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		events := h.audit()
-		if len(events) == 2 && events[0].Outcome == "upgraded" && events[0].BytesSent == int64(len(echoed)) && events[0].BytesReceived == int64(len(echoed)) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("upgrade audit: %+v", events)
-		}
-		time.Sleep(10 * time.Millisecond)
+	events := h.waitAudit(t, 2)
+	if len(events) != 2 || events[0].Outcome != "upgraded" || events[0].BytesSent != int64(len(echoed)) || events[0].BytesReceived != int64(len(echoed)) || events[1].Outcome != "forbidden" {
+		t.Fatalf("upgrade audit: %+v", events)
 	}
 }
 
@@ -458,5 +460,177 @@ allow if {
 	// The certificate was minted for the SNI name, so Host cannot name another.
 	if status := request(testHost, "other.test", "/steered"); status != 400 || calls.Load() != 1 {
 		t.Fatalf("Host disagreed with SNI: status=%d calls=%d", status, calls.Load())
+	}
+}
+
+// expiringAuth is the harness authenticator until expired is set, as a SPIFFE
+// connection is once the SVID it was opened with passes its expiry.
+type expiringAuth struct{ expired *atomic.Bool }
+
+func (a expiringAuth) Authenticate(r *http.Request) (auth.Identity, error) {
+	if a.expired.Load() {
+		return auth.Identity{}, auth.ErrUnauthenticated
+	}
+	return testAuth{}.Authenticate(r)
+}
+
+// A kept-alive connection that stops authenticating is closed with its 401, so
+// the client opens a new one instead of repeating the request on a dead one.
+func TestUnauthenticatedConnectionIsClosed(t *testing.T) {
+	authority, clientRoots := testAuthority(t)
+	h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }, true, Options{Interception: authority})
+	var expired atomic.Bool
+	s, err := NewSnapshot(SnapshotConfig{Version: "expiring", Authenticator: expiringAuth{&expired}, Policy: policyFor(t, "expiring-policy", true), Credentials: managerFor(t, testToken), Upstreams: []Upstream{h.upstream()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = h.g.Reload(s); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("unix", h.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	target := net.JoinHostPort(testHost, strconv.Itoa(h.port))
+	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	established, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	if err != nil || established.StatusCode != 200 {
+		t.Fatalf("CONNECT: %v", err)
+	}
+	secured := tls.Client(conn, &tls.Config{RootCAs: clientRoots, ServerName: testHost})
+	reader := bufio.NewReader(secured)
+	get := func() *http.Response {
+		t.Helper()
+		fmt.Fprintf(secured, "GET /x HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+		response, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		return response
+	}
+	if response := get(); response.StatusCode != 200 || response.Close {
+		t.Fatalf("authenticated request on a kept-alive connection: status=%d close=%v", response.StatusCode, response.Close)
+	}
+	expired.Store(true)
+	if response := get(); response.StatusCode != 401 || !response.Close {
+		t.Fatalf("unauthenticated request: status=%d close=%v", response.StatusCode, response.Close)
+	}
+	if _, err = reader.ReadByte(); err == nil || os.IsTimeout(err) {
+		t.Fatalf("connection stayed open after the 401: %v", err)
+	}
+}
+
+// A SPIFFE connection is retired before its certificate expires. The gateway
+// runs on the listener serve builds, with SVIDs from a local Workload API
+// server and a generated CA. A request on a connection whose certificate is in
+// the last quarter of its validity is answered normally with Connection:
+// close, and the connection ends. A fresh certificate keeps the connection.
+func TestSPIFFEConnectionRetiresBeforeExpiry(t *testing.T) {
+	authority, clientRoots := testAuthority(t)
+	h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }, true, Options{Interception: authority})
+	ca := spiffetest.NewCA(t, 1)
+	gatewaySVID, gatewayKey := ca.Issue(t, "spiffe://example.test/pdp", 2)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	source, err := auth.NewSPIFFE(ctx, spiffetest.Serve(t, &spiffetest.WorkloadAPI{Initial: ca.Response(gatewaySVID, gatewayKey)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { source.Close() })
+	h.installAuth(t, "spiffe", source, engineFor(t, "spiffe-policy", `package pdp.authz
+import rego.v1
+default allow := false
+allow if input.identity.spiffe_id == "spiffe://example.test/worker"
+`, nil), managerFor(t, testToken), h.upstream())
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewHTTPServer("", h.g)
+	go server.Serve(tls.NewListener(tcp, source.TLSConfig()))
+	t.Cleanup(func() { server.Close() })
+
+	bundle := x509bundle.FromX509Authorities(spiffeid.RequireTrustDomainFromString("example.test"), []*x509.Certificate{ca.Cert})
+	target := net.JoinHostPort(testHost, strconv.Itoa(h.port))
+	// open dials the SPIFFE listener with svid. With intercept it also opens a
+	// CONNECT and speaks TLS inside it, as a client with HTTPS_PROXY does.
+	// The returned function sends one request and reads the whole response.
+	open := func(svid *x509svid.SVID, intercept bool) (func() *http.Response, net.Conn) {
+		t.Helper()
+		conn, err := tls.Dial("tcp", tcp.Addr().String(), tlsconfig.MTLSClientConfig(svid, bundle, tlsconfig.AuthorizeID(gatewaySVID.ID)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		var stream io.ReadWriter = conn
+		requestTarget := "https://" + target + "/x"
+		if intercept {
+			fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+			established, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+			if err != nil || established.StatusCode != 200 {
+				t.Fatalf("CONNECT: %v", err)
+			}
+			stream, requestTarget = tls.Client(conn, &tls.Config{RootCAs: clientRoots, ServerName: testHost}), "/x"
+		}
+		reader := bufio.NewReader(stream)
+		return func() *http.Response {
+			t.Helper()
+			fmt.Fprintf(stream, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", requestTarget, target)
+			response, err := http.ReadResponse(reader, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			if response.StatusCode != 200 || string(body) != "ok" {
+				t.Fatalf("status=%d body=%s", response.StatusCode, body)
+			}
+			return response
+		}, conn
+	}
+	now := time.Now()
+	fresh, _ := ca.IssueValid(t, "spiffe://example.test/worker", 3, now.Add(-time.Minute), now.Add(time.Hour))
+	// Ten minutes remain of a validity of ninety.
+	old, _ := ca.IssueValid(t, "spiffe://example.test/worker", 4, now.Add(-80*time.Minute), now.Add(10*time.Minute))
+	for _, intercept := range []bool{false, true} {
+		get, _ := open(fresh, intercept)
+		if first, second := get(), get(); first.Close || second.Close {
+			t.Fatalf("intercept=%v: a connection with a fresh certificate was not kept", intercept)
+		}
+		get, conn := open(old, intercept)
+		if response := get(); !response.Close {
+			t.Fatalf("intercept=%v: no Connection: close near certificate expiry", intercept)
+		}
+		// The connection to the listener itself must end, which for an
+		// intercepted request is the tunnel around the inner connection.
+		if _, err := io.Copy(io.Discard, conn); os.IsTimeout(err) {
+			t.Fatalf("intercept=%v: connection stayed open after the retiring response", intercept)
+		}
+	}
+	// A Unix caller has no certificate, so its connection is never retired.
+	h.install(t, "unix", policyFor(t, "unix-policy", true), managerFor(t, testToken), h.upstream())
+	conn, err := net.Dial("unix", h.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	reader := bufio.NewReader(conn)
+	for range 2 {
+		fmt.Fprintf(conn, "GET https://%s/x HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+		response, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if response.StatusCode != 200 || response.Close {
+			t.Fatalf("Unix connection: status=%d close=%v", response.StatusCode, response.Close)
+		}
 	}
 }

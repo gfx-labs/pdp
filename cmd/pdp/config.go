@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"slices"
@@ -74,11 +75,11 @@ func snapshot(l *config.Loaded, a auth.Authenticator) (*gateway.Snapshot, error)
 
 // gatewayOptions reads the interception key only when serving. Offline
 // validation must work without that deployment secret.
-func gatewayOptions(l *config.Loaded, serving bool) (gateway.Options, error) {
+func gatewayOptions(l *config.Loaded, serving bool, logger *log.Logger) (gateway.Options, error) {
 	x := l.Config.Limits
 	o := gateway.Options{MaxRequestBytes: x.MaxRequestBytes, MaxResponseBytes: x.MaxResponseBytes, MaxHeaderBytes: x.MaxHeaderBytes, MaxConcurrent: x.MaxConcurrent, RequestTimeout: x.RequestTimeout, StreamTimeout: x.StreamTimeout, DisableUpstreamReuse: x.DisableUpstreamReuse, RootCAs: l.RootCAs}
 	if i := l.Config.Interception; i != nil && serving {
-		authority, err := intercept.Load(i.CertificateFile, i.KeyFile)
+		authority, err := intercept.Load(i.CertificateFile, i.KeyFile, logger)
 		if err != nil {
 			return o, err
 		}
@@ -150,7 +151,7 @@ func validateCommand(args []string, out, errout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	opts, err := gatewayOptions(l, false)
+	opts, err := gatewayOptions(l, false, nil)
 	if err != nil {
 		return err
 	}

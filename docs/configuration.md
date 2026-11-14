@@ -71,13 +71,17 @@ At least one of `unix_socket`, `spiffe` and `transparent` is required. `socket_m
 
 `spiffe.address` is a TCP listen address. `spiffe.workload_api` must start with `unix:///`. The listener requires TLS 1.3 and a client certificate that verifies against the current Workload API bundle. Session tickets are disabled. The certificate is checked again for every request, including each request inside an open `CONNECT`.
 
+A TLS 1.3 connection keeps the certificate it was opened with, so it cannot outlive that SVID. PDP therefore retires a SPIFFE connection early. Once less than a quarter of the certificate's validity period remains, every response on the connection carries `Connection: close` and PDP closes the connection after that response. Inside an intercepted `CONNECT` the tunnel is closed with it. The response itself is sent whole, however long it streams. The client's next request opens a new connection. The Workload API renews an SVID at half its lifetime, so a new connection carries a certificate with at least half its lifetime left. The rule comes from the certificate and has no setting. Unix and transparent callers are not affected. An opaque tunnel or a WebSocket is one request and is not cut by this rule: it ends at `limits.stream_timeout` or when the certificate fails verification on a later request.
+
+A response that is being relayed is never cut for expiry, because the certificate is checked only when a request arrives. Keep `limits.stream_timeout` at or below a quarter of the SVID lifetime. Then a response that starts before the connection is retiring ends before the SVID expires, and no later request on that connection meets an expired certificate.
+
 `transparent.http` and `transparent.https` are TCP listen addresses for DNS-steered clients. At least one is required when `transparent` is present. `https` requires `interception`, because PDP terminates TLS with a leaf for the SNI name. A caller on these listeners is identified by source address only, and is never treated as a Unix or SPIFFE caller.
 
 ### Interception
 
 `interception.certificate_file` holds the PEM CA certificate, followed by any intermediates below the root that workloads trust. `interception.key_file` holds its PEM private key. Both are required when the section is present. The certificate must be a currently valid CA with the certificate-signing key usage.
 
-PDP mints one ECDSA P-256 leaf per host, valid for at most 24 hours and never past the CA's expiry, and caches up to 1024 leaves. A leaf is replaced one hour before it expires. At most once a minute, PDP checks whether either file's modification time changed and reloads both. A failed reload keeps the loaded CA. This lets a renewed CA, such as one written by cert-manager, take effect without a restart. Renewal through cert-manager has not been tested.
+PDP mints one ECDSA P-256 leaf per host, valid for at most 24 hours and never past the CA's expiry, and caches up to 1024 leaves. A leaf is replaced one hour before it expires. At most once a minute, PDP checks whether either file's modification time changed and reloads both. A failed reload keeps the loaded CA. This lets a renewed CA, such as one written by cert-manager, take effect without a restart. Renewal through cert-manager has not been tested. A replacement in the kubelet's Secret volume layout, including a certificate and key from different generations, was run by hand once, see [acceptance.md](acceptance.md#interception-ca-replaced-while-serving). A reload is logged to standard error as `{"event":"interception_ca_reloaded",...}`. A failed one is logged as `{"event":"interception_ca_reload_failed","reason":...}` with both paths, once until the cause changes or a reload succeeds.
 
 Only `pdp serve` reads the files. `pdp validate` checks that both paths are set and does not open them. Anyone who holds the key can impersonate any host the CA permits to every workload that trusts its root. Protect it like a provider secret.
 
@@ -242,7 +246,7 @@ The output has `allow`, `identity`, `protocol`, `destination`, `binding`, `schem
 
 ### Request outcomes
 
-Authentication runs first. It fails with `401 unauthenticated` when the Unix peer UID cannot be read, the SPIFFE certificate does not verify, or a transparent caller has no source address. A verified caller that policy does not allow gets `403 forbidden`. Error bodies are `{"error": "<code>"}`:
+Authentication runs first. It fails with `401 unauthenticated` when the Unix peer UID cannot be read, the SPIFFE certificate does not verify, or a transparent caller has no source address. A verified caller that policy does not allow gets `403 forbidden`. A `401` carries `Connection: close` and PDP closes the connection, because a connection that failed authentication cannot pass it later. A SPIFFE connection fails this way once the SVID it was opened with expires. PDP retires a SPIFFE connection before that, see [Transport](#transport), so a `401` for expiry means the caller could not open a new connection with a renewed SVID in time. Error bodies are `{"error": "<code>"}`:
 
 | Status | Codes |
 | --- | --- |

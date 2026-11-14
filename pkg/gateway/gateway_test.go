@@ -49,6 +49,7 @@ type harness struct {
 	address  string
 	mu       sync.Mutex
 	events   []AuditEvent
+	audited  chan struct{}
 	lookups  []string
 }
 
@@ -113,7 +114,7 @@ func newHarness(t *testing.T, handler http.HandlerFunc, allow bool, options Opti
 	t.Helper()
 	upstream := httptest.NewTLSServer(handler)
 	t.Cleanup(upstream.Close)
-	h := &harness{roots: x509.NewCertPool(), address: upstream.Listener.Addr().String()}
+	h := &harness{roots: x509.NewCertPool(), address: upstream.Listener.Addr().String(), audited: make(chan struct{}, 1)}
 	h.roots.AddCert(upstream.Certificate())
 	_, port, _ := net.SplitHostPort(h.address)
 	h.port, _ = strconv.Atoi(port)
@@ -128,7 +129,15 @@ func newHarness(t *testing.T, handler http.HandlerFunc, allow bool, options Opti
 		h.mu.Unlock()
 		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
 	}
-	options.Audit = func(event AuditEvent) { h.mu.Lock(); h.events = append(h.events, event); h.mu.Unlock() }
+	options.Audit = func(event AuditEvent) {
+		h.mu.Lock()
+		h.events = append(h.events, event)
+		h.mu.Unlock()
+		select {
+		case h.audited <- struct{}{}:
+		default:
+		}
+	}
 	snapshot, err := NewSnapshot(SnapshotConfig{Version: "v1", Authenticator: testAuth{}, Policy: policyFor(t, "p1", allow), Credentials: managerFor(t, testToken), Upstreams: []Upstream{h.upstream()}})
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +175,12 @@ func (h *harness) upstream() Upstream {
 
 func (h *harness) install(t *testing.T, version string, engine *policy.Engine, credentials *credential.Manager, upstreams ...Upstream) {
 	t.Helper()
-	s, err := NewSnapshot(SnapshotConfig{Version: version, Authenticator: testAuth{}, Policy: engine, Credentials: credentials, Upstreams: upstreams})
+	h.installAuth(t, version, testAuth{}, engine, credentials, upstreams...)
+}
+
+func (h *harness) installAuth(t *testing.T, version string, authenticator auth.Authenticator, engine *policy.Engine, credentials *credential.Manager, upstreams ...Upstream) {
+	t.Helper()
+	s, err := NewSnapshot(SnapshotConfig{Version: version, Authenticator: authenticator, Policy: engine, Credentials: credentials, Upstreams: upstreams})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +193,24 @@ func (h *harness) audit() []AuditEvent {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]AuditEvent(nil), h.events...)
+}
+
+// waitAudit returns the events once there are at least n. An event is recorded
+// after its response has been written, so a caller that has the response may
+// be ahead of it, and events of different connections are in finishing order.
+func (h *harness) waitAudit(t *testing.T, n int) []AuditEvent {
+	t.Helper()
+	timeout := time.After(15 * time.Second)
+	for {
+		if events := h.audit(); len(events) >= n {
+			return events
+		}
+		select {
+		case <-h.audited:
+		case <-timeout:
+			t.Fatalf("want %d audit events, have %+v", n, h.audit())
+		}
+	}
 }
 
 // do sends one absolute-form request over the Unix socket. A target starting
@@ -270,7 +302,7 @@ func testAuthority(t *testing.T) (*intercept.Authority, *x509.CertPool) {
 	if err = os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded}), 0600); err != nil {
 		t.Fatal(err)
 	}
-	authority, err := intercept.Load(certificateFile, keyFile)
+	authority, err := intercept.Load(certificateFile, keyFile, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +351,7 @@ func TestUnixTLSForward(t *testing.T) {
 	if status != 200 || body != "plain text, not JSON" || calls.Load() != 1 {
 		t.Fatalf("status=%d body=%s calls=%d", status, body, calls.Load())
 	}
+	first := h.waitAudit(t, 1)[0]
 	var response http.Header
 	if status, _, body = h.request(t, "GET", "/reflected-header", "", http.Header{}); status != 502 || strings.Contains(body, testToken) {
 		t.Fatalf("credential reflected in a response header: status=%d", status)
@@ -327,11 +360,11 @@ func TestUnixTLSForward(t *testing.T) {
 	if status, response, _ = h.request(t, "GET", "/redirect", "", http.Header{}); status != 302 || response.Get("Location") != elsewhere.URL || redirected.Load() != 0 {
 		t.Fatalf("redirect was followed or dropped: status=%d", status)
 	}
-	audit, _ := json.Marshal(h.audit())
+	audit, _ := json.Marshal(h.waitAudit(t, 3))
 	if strings.Contains(string(audit), testToken) || strings.Contains(string(audit), "caller-secret") || strings.Contains(string(audit), "/repos/") || strings.Contains(string(audit), "state=open") {
 		t.Fatalf("audit contains request values: %s", audit)
 	}
-	if first := h.audit()[0]; first.Host != testHost || first.Port != h.port || first.Binding != "installation" || first.Protocol != "http" || first.Outcome != "forwarded" {
+	if first.Host != testHost || first.Port != h.port || first.Binding != "installation" || first.Protocol != "http" || first.Outcome != "forwarded" {
 		t.Fatalf("audit does not name the destination: %+v", first)
 	}
 	metrics := h.g.Metrics()

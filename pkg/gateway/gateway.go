@@ -592,6 +592,13 @@ func (g *Gateway) serve(w http.ResponseWriter, r, outer *http.Request, fixed *de
 	}
 }
 
+// retiring reports whether the caller's certificate is in the last quarter of
+// its validity. The Workload API renews an SVID at half its lifetime, so the
+// connection a client opens next carries a newer one, and none meets expiry.
+func retiring(identity auth.Identity, now time.Time) bool {
+	return !identity.NotAfter.IsZero() && identity.NotAfter.Sub(now) < identity.NotAfter.Sub(identity.NotBefore)/4
+}
+
 func (g *Gateway) exchange(w http.ResponseWriter, r, outer *http.Request, fixed *destination) (after func()) {
 	started := time.Now()
 	var s *Snapshot
@@ -617,10 +624,18 @@ func (g *Gateway) exchange(w http.ResponseWriter, r, outer *http.Request, fixed 
 	// SPIFFE bundle also stops requests inside an already open CONNECT.
 	identity, err := s.authenticator.Authenticate(outer)
 	if err != nil || !safeLabel(identity.ID()) {
+		// The connection cannot authenticate again, for example once the SVID it
+		// was opened with has expired. Closing it makes the client reconnect.
+		w.Header().Set("Connection", "close")
 		x.fail(http.StatusUnauthorized, "unauthenticated")
 		return nil
 	}
 	x.event.Principal = identity.ID()
+	if retiring(identity, started) {
+		// Only reuse ends: the server closes the connection after this response,
+		// however long it streams. Inside a CONNECT that closes the tunnel too.
+		w.Header().Set("Connection", "close")
+	}
 	if r.URL.Path == "" && r.Method != http.MethodConnect {
 		r.URL.Path = "/"
 	}

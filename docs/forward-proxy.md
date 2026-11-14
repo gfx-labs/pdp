@@ -234,20 +234,19 @@ Outside Kubernetes the same two files come from any CA tooling.
 - The proposal had a separate `plugin` field in each upstream entry. The code uses `schema`, and `input.plugin` is the schema name.
 - The proposal had adapter results set several headers. In the code an adapter result still sets one header. Extra fixed headers, such as an account ID, come from the binding's `headers`.
 - DNS forwarding needs an explicit `dns.resolver` address. `unlisted: "forward"` without a resolver is rejected.
-- The interception CA is reloaded on file change only, at most once a minute. `SIGHUP` does not reread it, and a change to the `interception` paths needs a restart.
+- The interception CA is reloaded on file change only, at most once a minute. A failed reload keeps the loaded CA and is logged once as `interception_ca_reload_failed` with its cause. `SIGHUP` does not reread it, and a change to the `interception` paths needs a restart.
 - Streams and WebSockets have one maximum duration, `limits.stream_timeout`. There is no separate idle timeout.
 - `pdp.authz/v1` input is not accepted. All packs moved to `pdp.authz/v2` in this change, which settles the proposal's second open question.
 
 ## What has not been established
 
 - Any real provider. Tests use local TLS servers.
-- SPIRE, a real Kubernetes cluster, cert-manager and trust-manager. None has been run with PDP.
+- SPIRE with the Kubernetes attestor or the SPIFFE CSI driver, a real Kubernetes cluster, cert-manager and trust-manager. None has been run with PDP. SPIRE with the `unix` attestor was run once on one machine, see [acceptance.md](acceptance.md#spire-run-on-one-machine).
 - Whether Jcode accepts each provider's placeholder in the format that provider's client code expects.
 - Whether DNS steering and TLS interception cover every connection a subscription client makes.
 - HTTP/2 and DNS over TCP. Neither is implemented.
 
 ## Open questions
 
-1. Many HTTP libraries cannot present a client certificate to an HTTPS proxy. Workloads using them need the Unix socket or a small local forwarder that holds the SVID. Whether PDP should ship that forwarder is undecided.
-2. Whether streams need an idle timeout separate from `stream_timeout`.
-3. Whether the streamed credential scan should also cover JSON-escaped forms, at the cost of holding back more bytes.
+1. Whether streams need an idle timeout separate from `stream_timeout`.
+2. Whether the streamed credential scan should also cover JSON-escaped forms, at the cost of holding back more bytes.

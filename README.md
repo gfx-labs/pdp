@@ -87,9 +87,13 @@ bin/pdp catalog --protocol graphql --schema examples/packs/linear-read/linear.gr
 bin/pdp schema diff --protocol rest before.json after.json
 bin/pdp request --socket /run/pdp/pdp.sock --method POST \
   --url https://api.linear.app/graphql --body query.json
+bin/pdp forward --listen 127.0.0.1:3128 \
+  --workload-api unix:///spiffe-workload-api/spire-agent.sock \
+  --gateway pdp.example.svc:8443 --gateway-id spiffe://example.org/ns/x/sa/pdp
+bin/pdp forward --check --listen 127.0.0.1:3128
 ```
 
-`catalog` prints the schema digest and each operation's request contract. `schema diff` reports added, removed and changed operations. `explain` takes a trusted `pdp.authz/v2` input for administrator debugging. It is not a caller endpoint and contacts nothing. A denied explanation is normal output. `request` sends one absolute-form request over the Unix socket and exits nonzero on a non-2xx response.
+`catalog` prints the schema digest and each operation's request contract. `schema diff` reports added, removed and changed operations. `explain` takes a trusted `pdp.authz/v2` input for administrator debugging. It is not a caller endpoint and contacts nothing. A denied explanation is normal output. `request` sends one absolute-form request over the Unix socket and exits nonzero on a non-2xx response. `forward` is for a client that knows only `HTTPS_PROXY=http://host:port`: it accepts on a loopback port and relays each connection, unread, over SPIFFE mTLS to a PDP SPIFFE listener. With `--check` it only tests that a forwarder accepts connections on the address, for a Kubernetes `exec` probe. See [deployment](docs/deployment.md#local-forwarder-for-clients-without-a-client-certificate).
 
 `SIGHUP` validates and atomically publishes a new snapshot: policy, upstreams, schemas, credential bindings and adapters together. Use a new revision for each update. A failed reload keeps the previous snapshot. Removing a caller from the policy and reloading revokes it for every request that starts afterward, including requests inside an open `CONNECT`. An open tunnel, WebSocket or streamed response keeps the old snapshot until it ends or `limits.stream_timeout` passes. Listeners, interception, DNS, `ca_file` and limits need a restart.
 
@@ -115,4 +119,4 @@ go vet ./...
 go test -race ./...
 ```
 
-The tests run against local TLS servers and a local DNS server only. They are not evidence that any real provider accepts a request, that SPIRE, a Kubernetes cluster, cert-manager or trust-manager work with PDP, or that DNS steering and TLS interception cover every connection a real client makes. None of those has been run.
+The tests run against local TLS servers and a local DNS server only. They are not evidence that any real provider accepts a request, that a Kubernetes cluster, cert-manager or trust-manager work with PDP, or that DNS steering and TLS interception cover every connection a real client makes. None of those has been run. The SPIFFE listener and `pdp forward` were run once by hand against a real SPIRE server and agent on one machine with the `unix` workload attestor, as [acceptance.md](docs/acceptance.md#spire-run-on-one-machine) records. SPIRE with the Kubernetes attestor or the SPIFFE CSI driver has not been run.

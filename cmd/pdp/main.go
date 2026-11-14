@@ -24,6 +24,7 @@ Commands:
   catalog     Print a schema operation catalog as JSON
   schema diff Compare two schema operation catalogs
   request     Send an HTTP request to a URL through the local Unix gateway socket
+  forward     Relay a loopback TCP port to a PDP SPIFFE listener, presenting the workload SVID
 
 Run pdp COMMAND --help for options.
 `
@@ -49,6 +50,8 @@ func run(args []string, out, errout io.Writer) error {
 		return schemaCommand(args[1:], out, errout)
 	case "request":
 		return requestCommand(args[1:], out, errout)
+	case "forward":
+		return forwardCommand(args[1:], out, errout)
 	default:
 		return errors.New("unknown command, run pdp --help")
 	}

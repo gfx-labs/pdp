@@ -1,6 +1,6 @@
 # Deployment
 
-The files under `examples/packs/systemd` and `examples/packs/github-spiffe` are templates. Nothing in this repository creates accounts, copies secrets, installs units, registers SPIFFE identities, issues an interception CA or applies Kubernetes resources. Tests validate the two packs offline and run the Unix transport, socket activation, a local Workload API server, a generated interception CA, a transparent TLS listener and a local DNS server. No SPIRE server, systemd installation, Kubernetes cluster, cert-manager or trust-manager has been used.
+The files under `examples/packs/systemd` and `examples/packs/github-spiffe` are templates. Nothing in this repository creates accounts, copies secrets, installs units, registers SPIFFE identities, issues an interception CA or applies Kubernetes resources. Tests validate the two packs offline and run the Unix transport, socket activation, a local Workload API server, a generated interception CA, a transparent TLS listener and a local DNS server. Separately, the SPIFFE listener and `pdp forward` were run once by hand against a real SPIRE 1.16.0 server and agent as local processes on one machine, with the `unix` workload attestor. See [acceptance.md](acceptance.md#spire-run-on-one-machine). The SPIRE Kubernetes attestor, the SPIFFE CSI driver, a systemd installation, a Kubernetes cluster, cert-manager and trust-manager have not been used.
 
 ## What the outer boundary is
 
@@ -73,6 +73,55 @@ Primary library and workload references:
 - <https://github.com/spiffe/go-spiffe>
 - <https://spiffe.io/docs/latest/deploying/configuring/>
 
+## Local forwarder for clients without a client certificate
+
+The SPIFFE listener requires a client certificate. Most programs that read `HTTPS_PROXY` (git, the Go toolchain, `gh`, most HTTP libraries) cannot present one to a proxy. `pdp forward` is a process that can. It holds the workload's SVID and gives those programs a plain loopback port.
+
+```sh
+pdp forward --listen 127.0.0.1:3128 \
+  --workload-api unix:///spiffe-workload-api/spire-agent.sock \
+  --gateway pdp.example.svc:8443 \
+  --gateway-id spiffe://example.org/ns/x/sa/pdp
+```
+
+All four flags are required. There is no configuration file.
+
+- For each accepted connection it opens one TLS 1.3 connection to `--gateway` once the client has sent its first bytes, presents the current X.509 SVID from the Workload API and accepts the gateway only if its SPIFFE ID equals `--gateway-id`. An SVID rotation applies to the next connection.
+- It then copies bytes both ways and reads no HTTP. Absolute-form requests and `CONNECT` reach PDP as the client wrote them, so PDP's policy, interception and audit behave as for any SPIFFE caller. A side that finishes sending is half-closed and still receives the rest.
+- `--listen` must be a loopback IP address with a port. Anything else is refused at start. Every process that can connect to the port is forwarded under the workload's SPIFFE ID, and PDP cannot tell them apart.
+- At start it waits up to 10 seconds for the Workload API and exits nonzero if no SVID arrives. When ready it prints `{"state": "ready"}`. `SIGINT` and `SIGTERM` close the listener and the open connections.
+- A gateway dial and handshake has 10 seconds. On failure the accepted connection is closed and one line goes to stderr. There is no retry and no pool. Successful connections are not logged. PDP's audit log is the record of requests.
+
+`pdp forward --check --listen 127.0.0.1:3128` is the probe for it. It opens a TCP connection to the address, closes it and exits 0, or exits 1 with one line on stderr when nothing accepts within 2 seconds. It needs no Workload API, configuration or state, and takes no other flag. The forwarder listens only after it has received its first SVID, so a passing check means it holds an identity. It does not show that PDP is reachable: the forwarder dials the gateway only when a client sends its first bytes, so the check never opens a connection to PDP.
+
+Pod shape:
+
+- The **workload container** sets `HTTPS_PROXY=http://127.0.0.1:3128` (and `HTTP_PROXY` if plain HTTP should also go through PDP), and trusts the interception CA root if PDP intercepts `CONNECT`. It does not mount the Workload API socket.
+- The **forwarder container** runs the PDP image with `forward` and mounts the Workload API socket, for example from the SPIFFE CSI driver. It needs no configuration, no secrets and no writable filesystem.
+- Run the forwarder as a native sidecar, an init container with `restartPolicy: Always`, and give it a startup probe. The kubelet then starts the workload container only after the forwarder listens. The image has no shell, so the probe runs the binary:
+
+  ```yaml
+  initContainers:
+    - name: pdp-forward
+      image: ghcr.io/gfx-labs/pdp:<commit>
+      restartPolicy: Always
+      args: [forward, --listen, "127.0.0.1:3128", --workload-api, "unix:///spiffe-workload-api/spire-agent.sock", --gateway, "pdp.example.svc:8443", --gateway-id, "spiffe://example.org/ns/x/sa/pdp"]
+      startupProbe:
+        exec:
+          command: [/usr/local/bin/pdp, forward, --check, --listen, "127.0.0.1:3128"]
+        periodSeconds: 1
+        failureThreshold: 60
+  ```
+
+  The forwarder exits if no SVID arrives within 10 seconds and the kubelet restarts it with a growing delay. A `failureThreshold` of 60 allows a minute for the registration entry to reach the agent across those restarts. This snippet has not been applied to a cluster.
+- Containers in a pod share the network namespace, so the loopback port is reachable from every container in the pod and from nothing outside it.
+
+Do not mount the Workload API socket into the workload container. With the socket the workload can fetch the SVID and its private key, copy them out and use them from anywhere the gateway is reachable until the SVID expires. Without it, the workload can use the identity only through the forwarder, while the pod runs. The pod's `NetworkPolicy` should allow egress to PDP and DNS only, as for any PDP caller.
+
+`TestForwardPresentsWorkloadSVID` runs the forwarder against a listener built the way `serve` builds it, with a local Workload API server and a generated CA. It checks that a request arrives authenticated as the workload's SPIFFE ID, that a half-closed client gets its response, and that a gateway with another ID is refused before any request is sent. It was also run by hand with real SPIRE on one machine, with curl and `git ls-remote` as the clients. See [acceptance.md](acceptance.md#spire-run-on-one-machine). It has not been run in a pod, with the CSI driver, or with the Go toolchain or `gh` as the client.
+
+A connection through the forwarder does not outlive the SVID it was opened with. PDP closes it after a response once less than a quarter of that certificate's validity remains, and the client reconnects. The forwarder opens the new connection with the renewed SVID. See [Transport](configuration.md#transport). The client needs nothing beyond ordinary HTTP handling of `Connection: close`.
+
 ## Interception CA
 
 An `interception` section is needed for `CONNECT` to anything but a tunnel upstream, and for the transparent HTTPS listener. Absolute-form requests, including `pdp request --url`, do not need it.
@@ -105,6 +154,20 @@ For clients that cannot be configured with a proxy, set `transport.transparent` 
 The manifest has no interception CA, DNS steering or `NetworkPolicy`. For a cluster setup with cert-manager and trust-manager see [forward-proxy.md](forward-proxy.md#kubernetes-and-cert-manager). That setup has not been tried.
 
 Replace the deliberately invalid image with an approved immutable digest. The CSI volume mounts the Workload API without a hostPath. The Secret is read-only and the container filesystem is read-only. The example uses a static mounted token. A refresh installation also needs a private, durable, daemon-writable state volume, not a read-only Secret.
+
+### Image
+
+`containers/pdp/Dockerfile` builds `cmd/pdp` with `CGO_ENABLED=0` and `-trimpath` onto a distroless static base. The image has the public CA roots, no shell, and runs as UID and GID 10001. Both base images are pinned by digest. `scripts/build-image` builds it from a clean checkout and tags it with the first 12 characters of the commit. `.github/workflows/image.yml` pushes `ghcr.io/gfx-labs/pdp:<commit>` from `main` and `p7-deploy` on the `talos-metal-gfx` runners and prints the digest. The image was built locally and the binary copied out and checked. No container was started from it, the workflow has not run, and nothing has been pushed.
+
+### Volumes
+
+PDP writes nothing outside the OAuth state directory and an optional Unix socket, so a read-only root filesystem works. What each kind of file needs:
+
+- **ConfigMap files** (configuration, policy, adapters, schemas) and **Secret files** (static tokens, the interception CA) are symlinks into a versioned directory. PDP follows them. A Secret with `defaultMode: 0440` is readable by a non-root PDP only through the pod's `fsGroup`. A token file that is group or world writable is refused.
+- **OAuth state** needs its directory at `0700` and `state.json` at `0600`, on a writable volume. With `fsGroup` set, the kubelet by default adds group read and write to every file and directory of a volume on each mount, and PDP then refuses the state. Set `fsGroupChangePolicy: OnRootMismatch` on the pod and keep the state in a subdirectory of the volume, such as `/var/lib/pdp/<account>/state.json`. The kubelet then changes modes only while the volume root has the wrong group or mode, which is the first mount of an empty volume. Seed the state after that. Whether a given CSI driver applies `fsGroup` at all depends on the driver.
+- A **Unix socket** directly in an `emptyDir` is refused. The kubelet creates the directory with mode `0777`, and PDP requires a socket parent that is not group or world writable. PDP does not create a subdirectory itself. The SPIFFE listener does not have this constraint.
+
+The ConfigMap, Secret and state layouts were reproduced with local files against the code that opens them. None was mounted by a kubelet.
 
 Register a SPIFFE ID for the gateway and one for each caller. Selectors must come from trusted attestation, including the intended namespace and service account and the real agent parent. `k8s:ns` and `k8s:sa` are attestor selectors, not caller labels. Do not let unrelated users create workloads under an authorized service account. A mutable pod label is not enough. Node or root compromise is inside the SPIRE trust boundary.
 
