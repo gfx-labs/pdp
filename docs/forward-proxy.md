@@ -234,7 +234,7 @@ Outside Kubernetes the same two files come from any CA tooling.
 - The proposal had a separate `plugin` field in each upstream entry. The code uses `schema`, and `input.plugin` is the schema name.
 - The proposal had adapter results set several headers. In the code an adapter result still sets one header. Extra fixed headers, such as an account ID, come from the binding's `headers`.
 - DNS forwarding needs an explicit `dns.resolver` address. `unlisted: "forward"` without a resolver is rejected.
-- The interception CA is reloaded on file change only, at most once a minute. `SIGHUP` does not reread it, and a change to the `interception` paths needs a restart.
+- The interception CA is reloaded on file change only, at most once a minute. A failed reload keeps the loaded CA and is logged once as `interception_ca_reload_failed` with its cause. `SIGHUP` does not reread it, and a change to the `interception` paths needs a restart.
 - Streams and WebSockets have one maximum duration, `limits.stream_timeout`. There is no separate idle timeout.
 - `pdp.authz/v1` input is not accepted. All packs moved to `pdp.authz/v2` in this change, which settles the proposal's second open question.
 

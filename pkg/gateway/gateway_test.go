@@ -275,7 +275,7 @@ func testAuthority(t *testing.T) (*intercept.Authority, *x509.CertPool) {
 	if err = os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded}), 0600); err != nil {
 		t.Fatal(err)
 	}
-	authority, err := intercept.Load(certificateFile, keyFile)
+	authority, err := intercept.Load(certificateFile, keyFile, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

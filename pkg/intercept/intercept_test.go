@@ -1,15 +1,18 @@
 package intercept
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"log"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,7 +62,7 @@ func verifies(leaf, root *x509.Certificate, host string) bool {
 func TestLoadRejectsNonCA(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthority(t, dir, false)
-	if _, err := Load(filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")); err == nil {
+	if _, err := Load(filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key"), nil); err == nil {
 		t.Fatal("a certificate without CA usage was loaded as the interception CA")
 	}
 }
@@ -69,7 +72,7 @@ func TestLoadRejectsNonCA(t *testing.T) {
 func TestRotatedAuthorityReplacesCachedLeaves(t *testing.T) {
 	dir := t.TempDir()
 	first := writeAuthority(t, dir, true)
-	authority, err := Load(filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key"))
+	authority, err := Load(filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,5 +99,67 @@ func TestRotatedAuthorityReplacesCachedLeaves(t *testing.T) {
 	}
 	if !verifies(after.Leaf, second, "api.example.com") || verifies(after.Leaf, first, "api.example.com") {
 		t.Fatal("leaf was not reissued under the rotated CA")
+	}
+}
+
+// A swap of the mounted files can be read half way: a new certificate with the
+// old key. The loaded CA stays in use and the failure is logged once, however
+// often the files are rechecked. The matching pair then loads and is reported.
+func TestFailedReloadKeepsAuthorityAndIsLogged(t *testing.T) {
+	dir := t.TempDir()
+	certificateFile, keyFile := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
+	first := writeAuthority(t, dir, true)
+	var logged bytes.Buffer
+	authority, err := Load(certificateFile, keyFile, log.New(&logged, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := writeAuthority(t, dir, true)
+	newKey, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modified := time.Now()
+	// publish writes the key and moves both modification times, then asks for
+	// a leaf with the wait between file checks skipped.
+	publish := func(key []byte) *x509.Certificate {
+		t.Helper()
+		if err := os.WriteFile(keyFile, key, 0600); err != nil {
+			t.Fatal(err)
+		}
+		modified = modified.Add(time.Hour)
+		for _, name := range []string{certificateFile, keyFile} {
+			if err := os.Chtimes(name, modified, modified); err != nil {
+				t.Fatal(err)
+			}
+		}
+		authority.mu.Lock()
+		authority.checkedAt = time.Time{}
+		authority.mu.Unlock()
+		certificate, err := authority.Certificate("api.example.com")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return certificate.Leaf
+	}
+	for range 2 {
+		if leaf := publish(oldKey); !verifies(leaf, first, "api.example.com") {
+			t.Fatal("a mismatched pair replaced the loaded CA")
+		}
+	}
+	failure := `{"event":"interception_ca_reload_failed","reason":"interception CA certificate and key do not match"`
+	if got := logged.String(); strings.Count(got, "\n") != 1 || !strings.HasPrefix(got, failure) || !strings.Contains(got, certificateFile) || !strings.Contains(got, keyFile) {
+		t.Fatalf("want one line naming the cause and both paths, got %q", got)
+	}
+	logged.Reset()
+	if leaf := publish(newKey); !verifies(leaf, second, "api.example.com") {
+		t.Fatal("the matching pair was not loaded")
+	}
+	if got := logged.String(); strings.Count(got, "\n") != 1 || !strings.HasPrefix(got, `{"event":"interception_ca_reloaded"`) {
+		t.Fatalf("want one line for the successful reload, got %q", got)
 	}
 }

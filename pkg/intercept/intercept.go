@@ -11,7 +11,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"errors"
+	"log"
 	"math/big"
 	"net"
 	"os"
@@ -38,6 +40,7 @@ type leaf struct {
 // host its certificate permits to every workload that trusts its root.
 type Authority struct {
 	certificateFile, keyFile string
+	logger                   *log.Logger
 
 	mu          sync.Mutex
 	chain       [][]byte
@@ -46,14 +49,18 @@ type Authority struct {
 	loadedAt    time.Time
 	modified    [2]time.Time
 	checkedAt   time.Time
-	order       *list.List
-	leaves      map[string]*list.Element
+	// failure is the cause of the last failed reload, so that a failure that
+	// repeats at every recheck is logged once.
+	failure string
+	order   *list.List
+	leaves  map[string]*list.Element
 }
 
 // Load reads a PEM CA certificate, followed by any intermediates below the root
-// that workloads trust, and its PEM private key.
-func Load(certificateFile, keyFile string) (*Authority, error) {
-	a := &Authority{certificateFile: certificateFile, keyFile: keyFile}
+// that workloads trust, and its PEM private key. Later reloads are reported to
+// logger, which may be nil.
+func Load(certificateFile, keyFile string, logger *log.Logger) (*Authority, error) {
+	a := &Authority{certificateFile: certificateFile, keyFile: keyFile, logger: logger}
 	if err := a.reload(); err != nil {
 		return nil, err
 	}
@@ -107,18 +114,41 @@ func (a *Authority) refresh(now time.Time) {
 		return
 	}
 	a.checkedAt = now
-	certificateInfo, err := os.Stat(a.certificateFile)
-	if err != nil {
-		return
-	}
-	keyInfo, err := os.Stat(a.keyFile)
-	if err != nil {
+	certificateInfo, certificateErr := os.Stat(a.certificateFile)
+	keyInfo, keyErr := os.Stat(a.keyFile)
+	if certificateErr != nil || keyErr != nil {
+		a.report(errors.New("interception CA file is unreadable"))
 		return
 	}
 	if certificateInfo.ModTime().Equal(a.modified[0]) && keyInfo.ModTime().Equal(a.modified[1]) {
 		return
 	}
-	_ = a.reload()
+	a.report(a.reload())
+}
+
+// report logs the outcome of a reload attempt: a failure when its cause
+// changes, and every success. The causes are fixed texts from this package,
+// so no file content can reach the log.
+func (a *Authority) report(err error) {
+	event := struct {
+		Event           string `json:"event"`
+		Reason          string `json:"reason,omitempty"`
+		CertificateFile string `json:"certificate_file"`
+		KeyFile         string `json:"key_file"`
+	}{"interception_ca_reloaded", "", a.certificateFile, a.keyFile}
+	if err != nil {
+		if err.Error() == a.failure {
+			return
+		}
+		event.Event, event.Reason = "interception_ca_reload_failed", err.Error()
+	}
+	a.failure = event.Reason
+	if a.logger == nil {
+		return
+	}
+	if line, marshalErr := json.Marshal(event); marshalErr == nil {
+		a.logger.Print(string(line))
+	}
 }
 
 // Certificate returns a leaf for one already validated host name or IP literal.

@@ -165,7 +165,7 @@ The client sent a request every 200 milliseconds for 330 seconds, each on a new 
 
 The third step is what PDP sees if it reads the certificate and the key on different sides of a swap. The two paths are resolved one after the other, so a swap between the two reads gives a certificate and a key that do not match. `reload` in `pkg/intercept/intercept.go` then fails at `tls.X509KeyPair`, and `refresh` keeps the CA already loaded. The recorded modification times are only updated by a successful reload, so PDP tries again at the next recheck, a minute later, and loads the pair once both files are from the same generation. A real torn read lasts one recheck. The run held the mismatch for 90 seconds to cover at least one.
 
-Two limits. A failed reload writes nothing to PDP's log, so a CA that stays unreadable or mismatched shows only as an old intermediate on new leaves, and later as failures when that intermediate expires. And PDP rechecks only when a client starts an intercepted TLS handshake, at most once a minute, so an idle PDP loads a new CA on the first handshake after the swap.
+Two limits. At the time of this run a failed reload wrote nothing to PDP's log. It now logs `interception_ca_reload_failed` with the cause and both paths, once until the cause changes, which `TestFailedReloadKeepsAuthorityAndIsLogged` covers. And PDP rechecks only when a client starts an intercepted TLS handshake, at most once a minute, so an idle PDP loads a new CA on the first handshake after the swap.
 
 Not covered: a real kubelet or cert-manager, a new root, an expired intermediate, a connection whose inner TLS session was opened before the swap and is still in use, and the SPIFFE listener in the same run.
 

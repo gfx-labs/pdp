@@ -209,7 +209,7 @@ func servePack(t *testing.T, name string, allowedUID int, requests []packRequest
 	if err != nil {
 		t.Fatal(err)
 	}
-	options, err := gatewayOptions(loaded, true)
+	options, err := gatewayOptions(loaded, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -107,7 +107,7 @@ func serveCommand(args []string, out, errout io.Writer) error {
 		return err
 	}
 	logger := log.New(errout, "", 0)
-	opts, err := gatewayOptions(l, true)
+	opts, err := gatewayOptions(l, true, logger)
 	if err != nil {
 		return err
 	}
