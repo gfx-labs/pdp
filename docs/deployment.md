@@ -1,6 +1,6 @@
 # Deployment
 
-The files under `examples/packs/systemd` and `examples/packs/github-spiffe` are templates. Nothing in this repository creates accounts, copies secrets, installs units, registers SPIFFE identities, issues an interception CA or applies Kubernetes resources. Tests validate the two packs offline and run the Unix transport, socket activation, a local Workload API server, a generated interception CA, a transparent TLS listener and a local DNS server. No SPIRE server, systemd installation, Kubernetes cluster, cert-manager or trust-manager has been used.
+The files under `examples/packs/systemd` and `examples/packs/github-spiffe` are templates. Nothing in this repository creates accounts, copies secrets, installs units, registers SPIFFE identities, issues an interception CA or applies Kubernetes resources. Tests validate the two packs offline and run the Unix transport, socket activation, a local Workload API server, a generated interception CA, a transparent TLS listener and a local DNS server. Separately, the SPIFFE listener and `pdp forward` were run once by hand against a real SPIRE 1.16.0 server and agent as local processes on one machine, with the `unix` workload attestor. See [acceptance.md](acceptance.md#spire-run-on-one-machine). The SPIRE Kubernetes attestor, the SPIFFE CSI driver, a systemd installation, a Kubernetes cluster, cert-manager and trust-manager have not been used.
 
 ## What the outer boundary is
 
@@ -100,7 +100,9 @@ Pod shape:
 
 Do not mount the Workload API socket into the workload container. With the socket the workload can fetch the SVID and its private key, copy them out and use them from anywhere the gateway is reachable until the SVID expires. Without it, the workload can use the identity only through the forwarder, while the pod runs. The pod's `NetworkPolicy` should allow egress to PDP and DNS only, as for any PDP caller.
 
-`TestForwardPresentsWorkloadSVID` runs the forwarder against a listener built the way `serve` builds it, with a local Workload API server and a generated CA. It checks that a request arrives authenticated as the workload's SPIFFE ID, that a half-closed client gets its response, and that a gateway with another ID is refused before any request is sent. It has not been run in a pod, with SPIRE or the CSI driver, or with git, the Go toolchain or `gh` as the client.
+`TestForwardPresentsWorkloadSVID` runs the forwarder against a listener built the way `serve` builds it, with a local Workload API server and a generated CA. It checks that a request arrives authenticated as the workload's SPIFFE ID, that a half-closed client gets its response, and that a gateway with another ID is refused before any request is sent. It was also run by hand with real SPIRE on one machine, with curl and `git ls-remote` as the clients. See [acceptance.md](acceptance.md#spire-run-on-one-machine). It has not been run in a pod, with the CSI driver, or with the Go toolchain or `gh` as the client.
+
+A connection through the forwarder ends when the SVID it was opened with expires. PDP answers the next request on it with `401` and closes it, and the client has to reconnect. A new connection uses the renewed SVID.
 
 ## Interception CA
 

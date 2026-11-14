@@ -4,7 +4,9 @@
 
 The checked-in tests exercise PDP's code, real local Unix listeners and TLS sockets, a generated interception CA, a local DNS server, the actual CLI lifecycle, pinned provider request-schema projections, and local credential exchange and persistence contracts. A local HTTPS server is transport and security evidence. It does not show that a real GitHub installation, Linear workspace or any other provider accepts a request.
 
-No real provider read or write, SPIRE deployment, Kubernetes deployment, cert-manager or trust-manager setup, or installed systemd unit has been run against this design. Not established either: whether Jcode accepts each provider's placeholder in the format that provider's client expects, and whether DNS steering and TLS interception cover every connection a subscription client makes. HTTP/2 and DNS over TCP are not implemented.
+The SPIFFE listener and `pdp forward` were also run by hand against a real SPIRE server and agent as local processes on one machine. See [SPIRE run on one machine](#spire-run-on-one-machine). That run used the `unix` workload attestor and a join token. It is not a SPIRE deployment.
+
+No real provider read or write, SPIRE deployment with the Kubernetes attestor or the SPIFFE CSI driver, Kubernetes deployment, cert-manager or trust-manager setup, or installed systemd unit has been run against this design. Not established either: whether Jcode accepts each provider's placeholder in the format that provider's client expects, and whether DNS steering and TLS interception cover every connection a subscription client makes. HTTP/2 and DNS over TCP are not implemented.
 
 | Acceptance boundary | Evidence and status |
 | --- | --- |
@@ -15,8 +17,9 @@ No real provider read or write, SPIRE deployment, Kubernetes deployment, cert-ma
 | Default deny, malformed results fail closed, removed builtins, exact JSON numbers, snapshot freezing | `pkg/policy` tests |
 | Loader accepts only JSON `pdp.config/v3`, rejects `pdp.config/v2` and removed fields such as `routes`, resolves files and policy data | `pkg/config` tests |
 | Unix peer binding, inherited socket, socket path ownership | `pkg/auth` tests |
-| SPIFFE verification and rotation against a local Workload API server | `TestSPIFFERotation`. This is not SPIRE. |
-| `pdp forward` relays a plain loopback connection over SPIFFE mTLS: the gateway listener authenticates the workload's ID, a half-closed client gets its response, a gateway with another ID is refused | `TestForwardPresentsWorkloadSVID`, local Workload API server. Not run in a pod or with a real client. |
+| SPIFFE verification and rotation against a local Workload API server | `TestSPIFFERotation`. This is not SPIRE. For real SPIRE see the manual run below. |
+| `pdp forward` relays a plain loopback connection over SPIFFE mTLS: the gateway listener authenticates the workload's ID, a half-closed client gets its response, a gateway with another ID is refused | `TestForwardPresentsWorkloadSVID`, local Workload API server. Not run in a pod. For curl and git through it see the manual run below. |
+| A request that fails authentication on a kept-alive connection gets `401` with `Connection: close`, and the connection is closed | `TestUnauthenticatedConnectionIsClosed` |
 | Gateway ambiguity, response boundary, TLS, reload and GraphQL occurrence tests on schema-backed upstreams | `pkg/gateway` tests |
 | A destination with no upstream entry is decided by policy and gets no credential. A denied name is never resolved. Policy sees resolved addresses and can refuse a name that resolves to loopback. | `TestUnlistedDestinationsAreDecidedByPolicy` |
 | `CONNECT` is intercepted with a CA leaf, each inner request is authorized and credentialed, an inner request naming another host is refused, and `CONNECT` without a CA is refused | `TestConnectInterception` |
@@ -32,7 +35,8 @@ No real provider read or write, SPIRE deployment, Kubernetes deployment, cert-ma
 | Real provider reads and the correct Linear app or user actor | Pending approved credentials and account scope |
 | Real provider comments and writes | Pending explicit approval for named disposable issues and repositories |
 | Installed systemd unit lifecycle, cross-UID filesystem isolation | Pending administrator account and unit installation |
-| Deployed SPIRE SVID and bundle rotation, service-account attestation | Pending installed SPIRE and registered identities |
+| SPIRE issuance and SVID rotation with the `unix` attestor on one machine | Run by hand once. See [SPIRE run on one machine](#spire-run-on-one-machine). |
+| Deployed SPIRE: Kubernetes service-account attestation, the SPIFFE CSI driver, trust bundle rotation | Pending installed SPIRE and registered identities |
 | Kubernetes deployment and all-replica revocation | Pending explicit cluster authorization |
 | cert-manager issuance and renewal of the interception CA, trust-manager distribution of its root | Not tried |
 | A real subscription client (such as Jcode) working through placeholders, DNS steering and interception | Not tried |
@@ -68,6 +72,47 @@ go test -race -count=1 -run '^(TestPacksServeTheirRequests|TestDeploymentPacksVa
 ```
 
 No test requires real provider credentials. Keep the focused security regressions and transport tests rather than replacing them with mocked provider success claims.
+
+## SPIRE run on one machine
+
+Run once by hand on November 14, 2026 (UTC), on Linux x86_64. It is not a checked-in test and nothing reruns it. Every process ran as one UID on loopback and Unix sockets. No container, cluster or real provider credential was involved.
+
+Versions: SPIRE 1.16.0 (`spire-1.16.0-linux-amd64-musl.tar.gz` from the GitHub release, SHA-256 checked against the published `_sha256sum.txt`), Go 1.27.3, curl 8.14.1, git 2.47.3, OpenSSL 3.5.7.
+
+Setup:
+
+- `spire-server run` with trust domain `p7.test`, the `sql` datastore on sqlite3, the `disk` key manager and the `join_token` node attestor. `spire-agent run -joinToken ...` with the `unix` workload attestor and `discover_workload_path = true`.
+- All workloads share one UID, so the entries tell them apart by executable path. The built `pdp` binary was copied to four paths. Three entries were created with `spire-server entry create -selector unix:uid:1000 -selector unix:path:<copy> -x509SVIDTTL 90`:
+
+  | Copy | SPIFFE ID | Ran as |
+  | --- | --- | --- |
+  | `bin/pdp-gateway` | `spiffe://p7.test/pdp` | `pdp serve` |
+  | `bin/pdp-worker` | `spiffe://p7.test/workload/worker` | `pdp forward` on `127.0.0.1:13128` |
+  | `bin/pdp-other` | `spiffe://p7.test/workload/other` | `pdp forward` on `127.0.0.1:13129` |
+  | `bin/pdp-unregistered` | none | `pdp forward` |
+
+- `pdp serve` had only `transport.spiffe` on `127.0.0.1:18443`, an `interception` CA made with `openssl`, `ca_file` naming a second generated CA, and one upstream, `localhost:19443`, with a `static` binding whose token file held a dummy string. The policy allowed `spiffe://p7.test/workload/worker` to reach `localhost:19443` with that binding and nothing else.
+- The upstream was a small Go TLS server on `127.0.0.1:19443` with a certificate from the second CA. `/echo` answered with the count and SHA-256 of the `Authorization` values it received. It also served a bare git repository as static files.
+- The clients were `curl` and `git` with `HTTPS_PROXY=http://127.0.0.1:13128` and a CA bundle holding only the interception CA.
+
+Results:
+
+| Check | Result |
+| --- | --- |
+| `curl -H 'Authorization: Bearer caller-supplied-value' https://localhost:19443/echo` through the worker forwarder | `200`. The upstream received one `Authorization` value, and its SHA-256 was that of `Bearer <dummy token>`, not of the caller's value. The audit line had `"principal":"spiffe://p7.test/workload/worker"`, `"binding":"local-upstream"`, `"matched_rules":["worker-call"]`, `"outcome":"forwarded"`. |
+| `git ls-remote https://localhost:19443/repo.git` through the worker forwarder | Printed the seeded commit for `refs/heads/main`. This is the dumb HTTP protocol, read only. |
+| `curl https://127.0.0.1:19443/echo` and `curl https://example.com/` through the worker forwarder | `403` with `{"error":"forbidden"}` for both. `CONNECT` itself answered `200`, and the refusal came on the request inside it. |
+| `curl https://localhost:19443/echo` through the forwarder running as `workload/other` | `403`. The audit line named `spiffe://p7.test/workload/other`. |
+| `pdp forward` from the unregistered copy | Exited 1 after 10 seconds with `cannot initialize SPIFFE Workload API`. The agent logged `No identity issued` with `registered=false`. |
+| Rotation, new connections: one request every 15 seconds for 210 seconds through each forwarder | Worker `200` and other `403` every time. The gateway presented six different SVID serial numbers in that time, and the agent renewed the worker SVID about every 40 seconds. |
+| Rotation, one kept-alive connection: 12 requests 20 seconds apart from one `curl` | Requests 40 and 60 seconds after the connection opened, after both the worker and gateway SVIDs had been renewed, got `200` on the same connection. The request at 80 seconds, after the SVID the connection was opened with had expired, got `401`. PDP closed the connection, curl opened a new one and the next request got `200`. The same happened once more at 180 seconds. |
+
+Two things this run found:
+
+1. **A kept-alive connection does not outlive the SVID it was opened with.** PDP verifies the client certificate again on every request, and that check includes the certificate's expiry. Renewal does not help an open connection, because TLS 1.3 has no way to present a new certificate on it. Before this run, PDP answered such a request with `401` and kept the connection open, so a client that reuses connections got `401` for every later request. In the first pass of this run, six requests in a row failed that way. PDP now sends `Connection: close` with the `401` and closes the connection. The request that meets the expiry still fails once, and curl did not retry it. With SVID lifetimes of an hour and PDP's 30 second idle timeout, a connection has to be in continuous use across the expiry for this to happen. A long transfer that is still running when the SVID expires was not tried.
+2. **An upstream that echoes the injected credential is cut off.** The first version of the `/echo` handler returned the `Authorization` value. PDP ended that response with outcome `credential_reflected`, as designed, and curl reported an empty reply. The handler was changed to return a hash.
+
+Not covered by this run: the Kubernetes workload attestor, the SPIFFE CSI driver, a cluster, trust bundle or CA rotation, removal of a registration entry while its workload runs, the server and agent on different hosts, a real provider, `git` over the smart HTTP protocol or a push, the Go toolchain and `gh` as clients, and the container image.
 
 ## Real GitHub acceptance, pending
 
@@ -116,7 +161,7 @@ Only after explicit write approval for a named disposable issue, send `examples/
 
 With a warm provider token, remove the caller from `allowed_uids` (or `allowed_workloads`), set a new `revision` in `pdp.json`, replace the files atomically, and send `SIGHUP`. Wait for `reload_applied` with the exact new `revision`. New requests must return `403`, including on a reused connection and inside an open intercepted `CONNECT`. Already-authorized requests may finish within their deadlines. An open stream, WebSocket or tunnel keeps the old snapshot until it ends or `stream_timeout` passes. `TestCLISocketReload` shows revocation against a local upstream. With several replicas, collect the acknowledgement from each or remove the stale ones from service.
 
-For SPIRE, rotate the gateway and caller SVIDs and trust bundles independently while sending requests. Confirm that named current identities continue, that a removed identity fails on a reused connection, and that a caller certificate is never taken for a provider credential. Confirm that attestation uses the intended namespace, service account and agent parent, and that a neighboring workload in the trust domain gets `403`.
+SVID rotation with real SPIRE on one machine is recorded under [SPIRE run on one machine](#spire-run-on-one-machine). Still pending for a deployed SPIRE: rotate the gateway and caller SVIDs and trust bundles independently while sending requests. Confirm that named current identities continue, that a removed identity fails on a reused connection, and that a caller certificate is never taken for a provider credential. Confirm that attestation uses the intended namespace, service account and agent parent, and that a neighboring workload in the trust domain gets `403`.
 
 For systemd, install the reviewed units only with approval, verify socket group access and a distinct daemon UID, stop and restart the service with the socket unit active, and confirm that the socket is not removed or replaced. For Kubernetes, review the manifest through an explicitly discovered `kubie` context before any authorized apply. Template validation and TCP readiness prove neither provider nor mTLS acceptance.
 

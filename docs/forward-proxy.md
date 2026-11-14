@@ -241,7 +241,7 @@ Outside Kubernetes the same two files come from any CA tooling.
 ## What has not been established
 
 - Any real provider. Tests use local TLS servers.
-- SPIRE, a real Kubernetes cluster, cert-manager and trust-manager. None has been run with PDP.
+- SPIRE with the Kubernetes attestor or the SPIFFE CSI driver, a real Kubernetes cluster, cert-manager and trust-manager. None has been run with PDP. SPIRE with the `unix` attestor was run once on one machine, see [acceptance.md](acceptance.md#spire-run-on-one-machine).
 - Whether Jcode accepts each provider's placeholder in the format that provider's client code expects.
 - Whether DNS steering and TLS interception cover every connection a subscription client makes.
 - HTTP/2 and DNS over TCP. Neither is implemented.
