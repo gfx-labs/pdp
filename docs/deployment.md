@@ -135,6 +135,20 @@ The manifest has no interception CA, DNS steering or `NetworkPolicy`. For a clus
 
 Replace the deliberately invalid image with an approved immutable digest. The CSI volume mounts the Workload API without a hostPath. The Secret is read-only and the container filesystem is read-only. The example uses a static mounted token. A refresh installation also needs a private, durable, daemon-writable state volume, not a read-only Secret.
 
+### Image
+
+`containers/pdp/Dockerfile` builds `cmd/pdp` with `CGO_ENABLED=0` and `-trimpath` onto a distroless static base. The image has the public CA roots, no shell, and runs as UID and GID 10001. Both base images are pinned by digest. `scripts/build-image` builds it from a clean checkout and tags it with the first 12 characters of the commit. `.github/workflows/image.yml` pushes `ghcr.io/gfx-labs/pdp:<commit>` from `main` and `p7-deploy` on the `talos-metal-gfx` runners and prints the digest. The image was built locally and the binary copied out and checked. No container was started from it, the workflow has not run, and nothing has been pushed.
+
+### Volumes
+
+PDP writes nothing outside the OAuth state directory and an optional Unix socket, so a read-only root filesystem works. What each kind of file needs:
+
+- **ConfigMap files** (configuration, policy, adapters, schemas) and **Secret files** (static tokens, the interception CA) are symlinks into a versioned directory. PDP follows them. A Secret with `defaultMode: 0440` is readable by a non-root PDP only through the pod's `fsGroup`. A token file that is group or world writable is refused.
+- **OAuth state** needs its directory at `0700` and `state.json` at `0600`, on a writable volume. With `fsGroup` set, the kubelet by default adds group read and write to every file and directory of a volume on each mount, and PDP then refuses the state. Set `fsGroupChangePolicy: OnRootMismatch` on the pod and keep the state in a subdirectory of the volume, such as `/var/lib/pdp/<account>/state.json`. The kubelet then changes modes only while the volume root has the wrong group or mode, which is the first mount of an empty volume. Seed the state after that. Whether a given CSI driver applies `fsGroup` at all depends on the driver.
+- A **Unix socket** directly in an `emptyDir` is refused. The kubelet creates the directory with mode `0777`, and PDP requires a socket parent that is not group or world writable. PDP does not create a subdirectory itself. The SPIFFE listener does not have this constraint.
+
+The ConfigMap, Secret and state layouts were reproduced with local files against the code that opens them. None was mounted by a kubelet.
+
 Register a SPIFFE ID for the gateway and one for each caller. Selectors must come from trusted attestation, including the intended namespace and service account and the real agent parent. `k8s:ns` and `k8s:sa` are attestor selectors, not caller labels. Do not let unrelated users create workloads under an authorized service account. A mutable pod label is not enough. Node or root compromise is inside the SPIRE trust boundary.
 
 The Service does not authorize callers. A caller needs its own SVID and an entry in `allowed_workloads` in `policy.rego`. Do not replace mTLS with an identity header. The TCP readiness probe shows the listener is up. It says nothing about provider credentials or policy.

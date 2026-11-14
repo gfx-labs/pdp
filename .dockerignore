@@ -1,0 +1,7 @@
+# Only the Go source reaches the builder. Secrets, state files and local
+# binaries in the checkout must never be sent to one.
+*
+!go.mod
+!go.sum
+!cmd
+!pkg
