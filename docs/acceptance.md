@@ -39,6 +39,7 @@ No real provider read or write, SPIRE deployment with the Kubernetes attestor or
 | SPIRE issuance and SVID rotation with the `unix` attestor on one machine | Run by hand once. See [SPIRE run on one machine](#spire-run-on-one-machine). |
 | Deployed SPIRE: Kubernetes service-account attestation, the SPIFFE CSI driver, trust bundle rotation | Pending installed SPIRE and registered identities |
 | Kubernetes deployment and all-replica revocation | Pending explicit cluster authorization |
+| The interception CA replaced under PDP in the kubelet's Secret volume layout, with a new intermediate and key under the same root | Run by hand once. See [Interception CA replaced while serving](#interception-ca-replaced-while-serving). |
 | cert-manager issuance and renewal of the interception CA, trust-manager distribution of its root | Not tried |
 | A real subscription client (such as Jcode) working through placeholders, DNS steering and interception | Not tried |
 
@@ -129,9 +130,44 @@ One `curl` process sent a request every 10 seconds for 5 minutes through `pdp fo
 
 The forwarder logged nothing. A first attempt got `403` for every request because the policy written for the run named the wrong upstream port. That was an error in the test setup, and the numbers above are from the run after it was corrected.
 
-A long transfer that is still running when the SVID expires was not tried. The response is not cut by this rule, and the certificate is not checked again until the next request.
+### Third run: a response that streams past the SVID's expiry
 
-Not covered by these runs: the Kubernetes workload attestor, the SPIFFE CSI driver, a cluster, trust bundle or CA rotation, removal of a registration entry while its workload runs, the server and agent on different hosts, a real provider, `git` over the smart HTTP protocol or a push, the Go toolchain and `gh` as clients, and the container image.
+Run once by hand on November 14, 2026 (UTC), with PDP built from `cfd86c5`, in its own directory with its own SPIRE server and agent, trust domain `rot3.test` and 90 second SVIDs. The upstream sent one server-sent event every 5 seconds for 240 seconds, 48 events and 711 bytes in all. A small Go client opened a `CONNECT` through `pdp forward`, spoke TLS inside it and read the stream.
+
+| Case | Client received | PDP audit line | After the stream |
+| --- | --- | --- | --- |
+| The stream starts on a new connection. Its SVID expired 79 seconds later, 161 seconds before the stream ended. | 48 of 48 events, no read error. The response did not carry `Connection: close`. | `forwarded`, `200`, `bytes_received` 711, `duration_ms` 240045 | The next request on the same connection got `401` with `Connection: close`. |
+| The stream starts on a connection already in its last quarter. Its SVID expired 25 seconds later, 216 seconds before the stream ended. | 48 of 48 events, no read error. The response carried `Connection: close`. | `forwarded`, `200`, `bytes_received` 711, `duration_ms` 240165 | PDP closed the connection. The next write got end of file. |
+
+Neither PDP nor the forwarder logged anything at the moment of expiry, and the upstream sent all 48 events both times. For the second case the client held two connections opened together, sent a request a second on both, and started the stream on one as soon as the other was marked `Connection: close`.
+
+Nothing is cut because nothing looks at the certificate while a response is being relayed. PDP verifies it once, when the request arrives, in `exchange` in `pkg/gateway/gateway.go`. TLS checks a certificate only during the handshake, and the go-spiffe configuration adds no later check. `pdp forward` copies bytes and reads no certificate after its own handshake. The bound on a relayed response is `limits.stream_timeout`.
+
+The first case shows what is left. A response that starts before the last quarter and runs past the expiry leaves a connection whose next request gets `401`. A response is bounded by `limits.stream_timeout`, and it starts with at least a quarter of the SVID's validity left, or else the connection is already retiring. So this cannot happen while `stream_timeout` is at most a quarter of the SVID lifetime. With 4 hour SVIDs that is `stream_timeout` of one hour or less. This run broke that condition on purpose: 90 second SVIDs against the default `stream_timeout` of ten minutes.
+
+Not covered by the SPIRE runs: the Kubernetes workload attestor, the SPIFFE CSI driver, a cluster, trust bundle or CA rotation, removal of a registration entry while its workload runs, the server and agent on different hosts, a real provider, `git` over the smart HTTP protocol or a push, the Go toolchain and `gh` as clients, and the container image.
+
+## Interception CA replaced while serving
+
+Run once by hand on November 14, 2026 (UTC), with PDP built from `cfd86c5`. It is not a checked-in test. PDP served a Unix socket. No kubelet, cert-manager or cluster was involved.
+
+The CA files were laid out the way the kubelet lays out a Secret volume: a timestamped directory holding `tls.crt` and `tls.key`, `..data` as a symlink to it, and `tls.crt` and `tls.key` as symlinks to `..data/tls.crt` and `..data/tls.key`. PDP's `interception` paths named the two outer symlinks. A rotation wrote a new timestamped directory, renamed a new `..data` symlink over the old one, and removed the old directory. The chain was a root made with `openssl` and intermediate CAs signed by it, each with its own key. PDP got an intermediate and its key. The client trusted only the root.
+
+The client sent a request every 200 milliseconds for 330 seconds, each on a new connection with a new `CONNECT` and a new inner TLS handshake, and recorded which intermediate had signed the leaf it was shown.
+
+| Step | Result |
+| --- | --- |
+| Start with intermediate 1 | Requests succeed. The leaf is signed by intermediate 1, PDP presents the leaf and the intermediate, and the chain verifies to the root. |
+| Rotate to intermediate 2, a new key under the same root | 38 seconds later the leaf is signed by intermediate 2. No restart and no `SIGHUP`. |
+| Publish the certificate of intermediate 3 with the key of intermediate 2, and leave it for 90 seconds | PDP kept signing with intermediate 2. No request failed. |
+| Rotate to intermediate 3 with its own key | 39 seconds later the leaf is signed by intermediate 3. |
+| Whole run | 1613 requests, 1613 answered `200`, 0 failures. 287 saw intermediate 1, 890 intermediate 2 and 436 intermediate 3. |
+
+The third step is what PDP sees if it reads the certificate and the key on different sides of a swap. The two paths are resolved one after the other, so a swap between the two reads gives a certificate and a key that do not match. `reload` in `pkg/intercept/intercept.go` then fails at `tls.X509KeyPair`, and `refresh` keeps the CA already loaded. The recorded modification times are only updated by a successful reload, so PDP tries again at the next recheck, a minute later, and loads the pair once both files are from the same generation. A real torn read lasts one recheck. The run held the mismatch for 90 seconds to cover at least one.
+
+Two limits. A failed reload writes nothing to PDP's log, so a CA that stays unreadable or mismatched shows only as an old intermediate on new leaves, and later as failures when that intermediate expires. And PDP rechecks only when a client starts an intercepted TLS handshake, at most once a minute, so an idle PDP loads a new CA on the first handshake after the swap.
+
+Not covered: a real kubelet or cert-manager, a new root, an expired intermediate, a connection whose inner TLS session was opened before the swap and is still in use, and the SPIFFE listener in the same run.
 
 ## Real GitHub acceptance, pending
 
