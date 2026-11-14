@@ -16,6 +16,7 @@ No real provider read or write, SPIRE deployment, Kubernetes deployment, cert-ma
 | Loader accepts only JSON `pdp.config/v3`, rejects `pdp.config/v2` and removed fields such as `routes`, resolves files and policy data | `pkg/config` tests |
 | Unix peer binding, inherited socket, socket path ownership | `pkg/auth` tests |
 | SPIFFE verification and rotation against a local Workload API server | `TestSPIFFERotation`. This is not SPIRE. |
+| `pdp forward` relays a plain loopback connection over SPIFFE mTLS: the gateway listener authenticates the workload's ID, a half-closed client gets its response, a gateway with another ID is refused | `TestForwardPresentsWorkloadSVID`, local Workload API server. Not run in a pod or with a real client. |
 | Gateway ambiguity, response boundary, TLS, reload and GraphQL occurrence tests on schema-backed upstreams | `pkg/gateway` tests |
 | A destination with no upstream entry is decided by policy and gets no credential. A denied name is never resolved. Policy sees resolved addresses and can refuse a name that resolves to loopback. | `TestUnlistedDestinationsAreDecidedByPolicy` |
 | `CONNECT` is intercepted with a CA leaf, each inner request is authorized and credentialed, an inner request naming another host is refused, and `CONNECT` without a CA is refused | `TestConnectInterception` |

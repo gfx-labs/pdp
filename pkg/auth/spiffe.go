@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
@@ -35,6 +36,14 @@ func (s *SPIFFE) TLSConfig() *tls.Config {
 	cfg.MinVersion = tls.VersionTLS13
 	cfg.SessionTicketsDisabled = true
 	cfg.NextProtos = []string{"http/1.1"}
+	return cfg
+}
+
+// ClientTLSConfig presents the current SVID and accepts only a server whose
+// SPIFFE ID is exactly id.
+func (s *SPIFFE) ClientTLSConfig(id spiffeid.ID) *tls.Config {
+	cfg := tlsconfig.MTLSClientConfig(s.source, s.source, tlsconfig.AuthorizeID(id))
+	cfg.MinVersion = tls.VersionTLS13
 	return cfg
 }
 

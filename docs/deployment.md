@@ -73,6 +73,35 @@ Primary library and workload references:
 - <https://github.com/spiffe/go-spiffe>
 - <https://spiffe.io/docs/latest/deploying/configuring/>
 
+## Local forwarder for clients without a client certificate
+
+The SPIFFE listener requires a client certificate. Most programs that read `HTTPS_PROXY` (git, the Go toolchain, `gh`, most HTTP libraries) cannot present one to a proxy. `pdp forward` is a process that can. It holds the workload's SVID and gives those programs a plain loopback port.
+
+```sh
+pdp forward --listen 127.0.0.1:3128 \
+  --workload-api unix:///spiffe-workload-api/spire-agent.sock \
+  --gateway pdp.example.svc:8443 \
+  --gateway-id spiffe://example.org/ns/x/sa/pdp
+```
+
+All four flags are required. There is no configuration file.
+
+- For each accepted connection it opens one TLS 1.3 connection to `--gateway`, presents the current X.509 SVID from the Workload API and accepts the gateway only if its SPIFFE ID equals `--gateway-id`. An SVID rotation applies to the next connection.
+- It then copies bytes both ways and reads no HTTP. Absolute-form requests and `CONNECT` reach PDP as the client wrote them, so PDP's policy, interception and audit behave as for any SPIFFE caller. A side that finishes sending is half-closed and still receives the rest.
+- `--listen` must be a loopback IP address with a port. Anything else is refused at start. Every process that can connect to the port is forwarded under the workload's SPIFFE ID, and PDP cannot tell them apart.
+- At start it waits up to 10 seconds for the Workload API and exits nonzero if no SVID arrives. When ready it prints `{"state": "ready"}`. `SIGINT` and `SIGTERM` close the listener and the open connections.
+- A gateway dial and handshake has 10 seconds. On failure the accepted connection is closed and one line goes to stderr. There is no retry and no pool. Successful connections are not logged. PDP's audit log is the record of requests.
+
+Pod shape:
+
+- The **workload container** sets `HTTPS_PROXY=http://127.0.0.1:3128` (and `HTTP_PROXY` if plain HTTP should also go through PDP), and trusts the interception CA root if PDP intercepts `CONNECT`. It does not mount the Workload API socket.
+- The **forwarder container** runs the PDP image with `forward` and mounts the Workload API socket, for example from the SPIFFE CSI driver. It needs no configuration, no secrets and no writable filesystem.
+- Containers in a pod share the network namespace, so the loopback port is reachable from every container in the pod and from nothing outside it.
+
+Do not mount the Workload API socket into the workload container. With the socket the workload can fetch the SVID and its private key, copy them out and use them from anywhere the gateway is reachable until the SVID expires. Without it, the workload can use the identity only through the forwarder, while the pod runs. The pod's `NetworkPolicy` should allow egress to PDP and DNS only, as for any PDP caller.
+
+`TestForwardPresentsWorkloadSVID` runs the forwarder against a listener built the way `serve` builds it, with a local Workload API server and a generated CA. It checks that a request arrives authenticated as the workload's SPIFFE ID, that a half-closed client gets its response, and that a gateway with another ID is refused before any request is sent. It has not been run in a pod, with SPIRE or the CSI driver, or with git, the Go toolchain or `gh` as the client.
+
 ## Interception CA
 
 An `interception` section is needed for `CONNECT` to anything but a tunnel upstream, and for the transparent HTTPS listener. Absolute-form requests, including `pdp request --url`, do not need it.

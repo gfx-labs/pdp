@@ -248,6 +248,5 @@ Outside Kubernetes the same two files come from any CA tooling.
 
 ## Open questions
 
-1. Many HTTP libraries cannot present a client certificate to an HTTPS proxy. Workloads using them need the Unix socket or a small local forwarder that holds the SVID. Whether PDP should ship that forwarder is undecided.
-2. Whether streams need an idle timeout separate from `stream_timeout`.
-3. Whether the streamed credential scan should also cover JSON-escaped forms, at the cost of holding back more bytes.
+1. Whether streams need an idle timeout separate from `stream_timeout`.
+2. Whether the streamed credential scan should also cover JSON-escaped forms, at the cost of holding back more bytes.

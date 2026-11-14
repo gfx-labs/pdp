@@ -46,5 +46,5 @@ done
 - Pod IPs are reused. A decision keyed on `identity.ip` applies to whichever pod holds the address.
 - If the CNI rewrites the source address before traffic reaches the pod (some Service or node-port paths do), every steered caller looks the same. Check what PDP logs as `principal`.
 - DNS steering is UDP only. A changed set of steered names needs a restart, not a reload.
-- A proxy-aware client must be able to present a client certificate to its proxy. Many HTTP clients cannot.
+- A proxy-aware client must be able to present a client certificate to its proxy. Many HTTP clients cannot. Those need `pdp forward` in a second container, see [deployment](../../../docs/deployment.md#local-forwarder-for-clients-without-a-client-certificate). The manifests here do not include it.
 - PDP runs one replica here. Credential state files and the DNS address assume that.
