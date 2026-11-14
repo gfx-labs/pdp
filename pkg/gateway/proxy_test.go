@@ -280,6 +280,27 @@ func TestStreamedResponse(t *testing.T) {
 	if last := events[len(events)-1]; last.Outcome != "credential_reflected" || last.Status != 502 {
 		t.Fatalf("reflection audit: %+v", last)
 	}
+
+	// A caller that hangs up mid-stream is not an upstream fault.
+	conn, err = net.Dial("unix", h.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	release = make(chan struct{})
+	defer close(release)
+	fmt.Fprintf(conn, "GET %s/events HTTP/1.1\r\nHost: pdp\r\n\r\n", h.base)
+	if response, err = http.ReadResponse(bufio.NewReader(conn), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = io.ReadFull(response.Body, first); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	events = h.waitAudit(t, len(events)+1)
+	if last := events[len(events)-1]; last.Outcome != "client_closed" {
+		t.Fatalf("hang-up audit: %+v", last)
+	}
 }
 
 // Reads share an upstream connection. A write with a body that the upstream

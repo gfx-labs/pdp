@@ -312,6 +312,7 @@ func (x *exchange) respondStream(response *http.Response, credentialed bool, lea
 		}
 		if len(chunk) > 0 {
 			if _, writeErr := x.w.Write(chunk); writeErr != nil {
+				x.outcome = "client_closed"
 				return
 			}
 			x.event.BytesReceived += int64(len(chunk))
@@ -319,7 +320,12 @@ func (x *exchange) respondStream(response *http.Response, credentialed bool, lea
 		}
 		if err != nil {
 			if err != io.EOF {
+				// A caller that hangs up cancels the upstream request, so the
+				// read fails here without any fault at the upstream.
 				x.outcome = "upstream_interrupted"
+				if x.r.Context().Err() != nil {
+					x.outcome = "client_closed"
+				}
 				panic(http.ErrAbortHandler)
 			}
 			return
