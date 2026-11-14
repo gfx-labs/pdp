@@ -19,6 +19,7 @@ No real provider read or write, SPIRE deployment with the Kubernetes attestor or
 | Unix peer binding, inherited socket, socket path ownership | `pkg/auth` tests |
 | SPIFFE verification and rotation against a local Workload API server | `TestSPIFFERotation`. This is not SPIRE. For real SPIRE see the manual run below. |
 | `pdp forward` relays a plain loopback connection over SPIFFE mTLS: the gateway listener authenticates the workload's ID, a half-closed client gets its response, a gateway with another ID is refused | `TestForwardPresentsWorkloadSVID`, local Workload API server. Not run in a pod. For curl and git through it see the manual run below. |
+| `pdp forward --check` passes against a running forwarder without making it dial its gateway, and fails against a closed port | `TestForwardCheck`. Not run as a kubelet probe. |
 | A request that fails authentication on a kept-alive connection gets `401` with `Connection: close`, and the connection is closed | `TestUnauthenticatedConnectionIsClosed` |
 | A SPIFFE connection whose certificate is in the last quarter of its validity gets its normal `200` with `Connection: close` and is then closed, for a direct request and inside an intercepted `CONNECT`, where the tunnel closes too. A fresh certificate and a Unix caller keep their connections. | `TestSPIFFEConnectionRetiresBeforeExpiry`, real TLS with SVIDs from a local Workload API server |
 | Gateway ambiguity, response boundary, TLS, reload and GraphQL occurrence tests on schema-backed upstreams | `pkg/gateway` tests |

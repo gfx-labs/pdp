@@ -23,6 +23,8 @@ import (
 
 const gatewayDialTimeout = 10 * time.Second
 
+const forwardUsage = "usage: pdp forward --listen 127.0.0.1:PORT --workload-api unix:///PATH --gateway HOST:PORT --gateway-id SPIFFE_ID, or pdp forward --check --listen 127.0.0.1:PORT"
+
 // loopbackListenAddress refuses anything but a loopback IP and a fixed port.
 // Every process that can reach the port is forwarded under the workload's SVID.
 func loopbackListenAddress(address string) error {
@@ -40,11 +42,21 @@ func forwardCommand(args []string, out, errout io.Writer) error {
 	workloadAPI := fs.String("workload-api", "", "SPIFFE Workload API endpoint, unix:///PATH")
 	gateway := fs.String("gateway", "", "PDP SPIFFE listener, HOST:PORT")
 	gatewayID := fs.String("gateway-id", "", "SPIFFE ID the gateway must present")
+	check := fs.Bool("check", false, "only test that a forwarder accepts connections on --listen, for an exec probe")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if *check {
+		if fs.NArg() != 0 || *listen == "" || *workloadAPI != "" || *gateway != "" || *gatewayID != "" {
+			return errors.New(forwardUsage)
+		}
+		if err := loopbackListenAddress(*listen); err != nil {
+			return err
+		}
+		return checkForwarder(*listen)
+	}
 	if fs.NArg() != 0 || *listen == "" || *workloadAPI == "" || *gateway == "" || *gatewayID == "" {
-		return errors.New("usage: pdp forward --listen 127.0.0.1:PORT --workload-api unix:///PATH --gateway HOST:PORT --gateway-id SPIFFE_ID")
+		return errors.New(forwardUsage)
 	}
 	if err := loopbackListenAddress(*listen); err != nil {
 		return err
@@ -81,6 +93,17 @@ func forwardCommand(args []string, out, errout io.Writer) error {
 	return forward(ctx, listener.(*net.TCPListener), *gateway, source.ClientTLSConfig(id), log.New(errout, "", 0))
 }
 
+// checkForwarder connects and closes without sending. The forwarder listens
+// only once it holds an SVID, and does not dial the gateway for a connection
+// that sends nothing, so this reads no identity and reaches no other host.
+func checkForwarder(address string) error {
+	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
+	if err != nil {
+		return errors.New("no forwarder accepts connections on " + address)
+	}
+	return conn.Close()
+}
+
 // forward relays each accepted connection over its own mTLS connection to the
 // gateway until ctx ends. It reads no HTTP, so the proxy conversation,
 // including CONNECT, reaches the gateway as the client wrote it.
@@ -101,6 +124,15 @@ func forward(ctx context.Context, listener *net.TCPListener, gateway string, con
 		}
 		connections.Go(func() {
 			defer client.Close()
+			stopClient := context.AfterFunc(ctx, func() { client.Close() })
+			defer stopClient()
+			// In a proxy conversation the client speaks first. A connection that
+			// ends without sending, such as a listen probe, never reaches the gateway.
+			first := make([]byte, 4096)
+			n, _ := client.Read(first)
+			if n == 0 {
+				return
+			}
 			dialCtx, cancel := context.WithTimeout(ctx, gatewayDialTimeout)
 			conn, err := dialer.DialContext(dialCtx, "tcp", gateway)
 			cancel()
@@ -112,8 +144,11 @@ func forward(ctx context.Context, listener *net.TCPListener, gateway string, con
 				return
 			}
 			defer conn.Close()
-			stop := context.AfterFunc(ctx, func() { client.Close(); conn.Close() })
+			stop := context.AfterFunc(ctx, func() { conn.Close() })
 			defer stop()
+			if _, err = conn.Write(first[:n]); err != nil {
+				return
+			}
 			relay(client, conn.(*tls.Conn))
 		})
 	}

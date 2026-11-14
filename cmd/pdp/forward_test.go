@@ -173,6 +173,44 @@ func TestForwardPresentsWorkloadSVID(t *testing.T) {
 	}
 }
 
+// The check is what a Kubernetes exec probe runs. It passes against a running
+// forwarder without making that forwarder contact its gateway, and fails
+// against a port nothing listens on.
+func TestForwardCheck(t *testing.T) {
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := closed.Addr().String()
+	closed.Close()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs lockedBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	// No gateway listens, so any attempt to reach it would be logged as a failure.
+	go func() {
+		done <- forward(ctx, listener.(*net.TCPListener), gateway, &tls.Config{}, log.New(&logs, "", 0))
+	}()
+	var out, errout bytes.Buffer
+	if err = run([]string{"forward", "--check", "--listen", listener.Addr().String()}, &out, &errout); err != nil {
+		t.Fatalf("check against a running forwarder: %v", err)
+	}
+	cancel()
+	// forward returns only after every accepted connection has been handled.
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	if logs.String() != "" || out.Len() != 0 || errout.Len() != 0 {
+		t.Fatalf("the check made the forwarder dial its gateway or printed: %q %q %q", logs.String(), out.String(), errout.String())
+	}
+	if err = run([]string{"forward", "--check", "--listen", gateway}, &out, &errout); err == nil {
+		t.Fatal("check passed against a port nothing listens on")
+	}
+}
+
 func TestForwardListenAddressMustBeLoopback(t *testing.T) {
 	for address, valid := range map[string]bool{
 		"127.0.0.1:3128": true,
