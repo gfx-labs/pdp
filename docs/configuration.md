@@ -242,7 +242,7 @@ The output has `allow`, `identity`, `protocol`, `destination`, `binding`, `schem
 
 ### Request outcomes
 
-Authentication runs first. It fails with `401 unauthenticated` when the Unix peer UID cannot be read, the SPIFFE certificate does not verify, or a transparent caller has no source address. A verified caller that policy does not allow gets `403 forbidden`. Error bodies are `{"error": "<code>"}`:
+Authentication runs first. It fails with `401 unauthenticated` when the Unix peer UID cannot be read, the SPIFFE certificate does not verify, or a transparent caller has no source address. A verified caller that policy does not allow gets `403 forbidden`. A `401` carries `Connection: close` and PDP closes the connection, because a connection that failed authentication cannot pass it later. A SPIFFE connection fails this way once the SVID it was opened with expires, so a kept-alive connection lasts at most the remaining lifetime of that SVID, and the request that meets the expiry gets the `401`. Error bodies are `{"error": "<code>"}`:
 
 | Status | Codes |
 | --- | --- |

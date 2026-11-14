@@ -617,6 +617,9 @@ func (g *Gateway) exchange(w http.ResponseWriter, r, outer *http.Request, fixed 
 	// SPIFFE bundle also stops requests inside an already open CONNECT.
 	identity, err := s.authenticator.Authenticate(outer)
 	if err != nil || !safeLabel(identity.ID()) {
+		// The connection cannot authenticate again, for example once the SVID it
+		// was opened with has expired. Closing it makes the client reconnect.
+		w.Header().Set("Connection", "close")
 		x.fail(http.StatusUnauthorized, "unauthenticated")
 		return nil
 	}

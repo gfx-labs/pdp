@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gfx-labs/pdp/pkg/auth"
 	"github.com/gfx-labs/pdp/pkg/credential"
 )
 
@@ -458,5 +459,66 @@ allow if {
 	// The certificate was minted for the SNI name, so Host cannot name another.
 	if status := request(testHost, "other.test", "/steered"); status != 400 || calls.Load() != 1 {
 		t.Fatalf("Host disagreed with SNI: status=%d calls=%d", status, calls.Load())
+	}
+}
+
+// expiringAuth is the harness authenticator until expired is set, as a SPIFFE
+// connection is once the SVID it was opened with passes its expiry.
+type expiringAuth struct{ expired *atomic.Bool }
+
+func (a expiringAuth) Authenticate(r *http.Request) (auth.Identity, error) {
+	if a.expired.Load() {
+		return auth.Identity{}, auth.ErrUnauthenticated
+	}
+	return testAuth{}.Authenticate(r)
+}
+
+// A kept-alive connection that stops authenticating is closed with its 401, so
+// the client opens a new one instead of repeating the request on a dead one.
+func TestUnauthenticatedConnectionIsClosed(t *testing.T) {
+	authority, clientRoots := testAuthority(t)
+	h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }, true, Options{Interception: authority})
+	var expired atomic.Bool
+	s, err := NewSnapshot(SnapshotConfig{Version: "expiring", Authenticator: expiringAuth{&expired}, Policy: policyFor(t, "expiring-policy", true), Credentials: managerFor(t, testToken), Upstreams: []Upstream{h.upstream()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = h.g.Reload(s); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("unix", h.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	target := net.JoinHostPort(testHost, strconv.Itoa(h.port))
+	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	established, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	if err != nil || established.StatusCode != 200 {
+		t.Fatalf("CONNECT: %v", err)
+	}
+	secured := tls.Client(conn, &tls.Config{RootCAs: clientRoots, ServerName: testHost})
+	reader := bufio.NewReader(secured)
+	get := func() *http.Response {
+		t.Helper()
+		fmt.Fprintf(secured, "GET /x HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+		response, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		return response
+	}
+	if response := get(); response.StatusCode != 200 || response.Close {
+		t.Fatalf("authenticated request on a kept-alive connection: status=%d close=%v", response.StatusCode, response.Close)
+	}
+	expired.Store(true)
+	if response := get(); response.StatusCode != 401 || !response.Close {
+		t.Fatalf("unauthenticated request: status=%d close=%v", response.StatusCode, response.Close)
+	}
+	if _, err = reader.ReadByte(); err == nil || os.IsTimeout(err) {
+		t.Fatalf("connection stayed open after the 401: %v", err)
 	}
 }
