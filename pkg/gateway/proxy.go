@@ -51,8 +51,8 @@ func (x *exchange) request(identity auth.Identity, dest destination) {
 		x.fail(http.StatusBadRequest, "invalid_request")
 		return
 	}
-	// A credential or a pinned schema is never used over plaintext HTTP.
-	if up != nil && dest.scheme != "https" && (len(up.bindings) > 0 || up.strict()) {
+	// Plaintext credential injection needs an explicit destination opt-in.
+	if up != nil && dest.scheme != "https" && !up.AllowHTTP && (len(up.bindings) > 0 || up.strict()) {
 		x.fail(http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -83,6 +83,14 @@ func (x *exchange) request(identity auth.Identity, dest destination) {
 		input.HTTP = &policy.HTTPInput{Method: r.Method, Path: r.URL.EscapedPath(), Query: parsed}
 		if isWebSocket(r) {
 			input.Protocol = policy.ProtocolWebSocket
+		}
+	}
+	if up != nil && len(up.PolicyHeaders) > 0 {
+		input.HTTP.Headers = make(map[string][]string, len(up.PolicyHeaders))
+		for _, name := range up.PolicyHeaders {
+			if values := r.Header.Values(name); len(values) > 0 {
+				input.HTTP.Headers[strings.ToLower(name)] = append([]string(nil), values...)
+			}
 		}
 	}
 	token := up != nil && up.tokenPaths[r.URL.Path]
@@ -160,7 +168,7 @@ func (x *exchange) request(identity auth.Identity, dest destination) {
 	// "Connection: close" beside "Connection: Upgrade" would refuse the upgrade.
 	// A nil GetBody keeps Transport from resending a request that has a body.
 	// It still resends a bodiless one when the caller sent an Idempotency-Key.
-	out.Close, out.GetBody = g.opts.DisableUpstreamReuse && input.Protocol != policy.ProtocolWebSocket, nil
+	out.Close = g.opts.DisableUpstreamReuse && input.Protocol != policy.ProtocolWebSocket
 	if chosen != nil {
 		// Every field that could carry the caller's own or placeholder
 		// credential is replaced, not only the one the adapter sets.
@@ -179,11 +187,12 @@ func (x *exchange) request(identity auth.Identity, dest destination) {
 		}
 		// The response scan reads raw bytes, so no compressed response.
 		out.Header.Set("Accept-Encoding", "identity")
-		if err = lease.Apply(out.Header); err != nil {
+		if err = lease.ApplyRequest(out); err != nil {
 			x.fail(http.StatusBadGateway, "credential_unavailable")
 			return
 		}
 	}
+	out.GetBody = nil
 	// No Client is used: RoundTrip performs exactly one request and cannot follow redirects.
 	response, err := g.transport.RoundTrip(out.WithContext(context.WithValue(ctx, pinKey{}, addresses)))
 	if err != nil {

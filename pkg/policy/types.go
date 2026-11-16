@@ -38,6 +38,8 @@ type Resource struct {
 }
 
 type HTTPInput struct {
+	// Headers contains only administrator-selected non-secret request headers.
+	Headers         map[string][]string `json:"headers,omitempty"`
 	Method          string              `json:"method"`
 	Path            string              `json:"path"`
 	PathParams      map[string]string   `json:"path_params,omitempty"`

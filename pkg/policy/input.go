@@ -41,6 +41,13 @@ func inputValue(input Input) (ast.Value, error) {
 		http := object{}
 		http.text("method", input.HTTP.Method, &b)
 		http.text("path", input.HTTP.Path, &b)
+		if len(input.HTTP.Headers) > 0 {
+			headers := object{}
+			for key, values := range input.HTTP.Headers {
+				headers.addKey(b.text(key), b.texts(values))
+			}
+			http.add("headers", headers.term())
+		}
 		if len(input.HTTP.PathParams) > 0 {
 			params := object{}
 			for key, value := range input.HTTP.PathParams {
