@@ -28,7 +28,7 @@ jobs:
             --entrypoint /bin/sh chrislusf/seaweedfs:4.31@sha256:e14ad400e28c811fe8426dc08abf248ec722b9f017713290a9b84a54557f45c2 -ec '
             printf "%s" '\''{"identities":[{"name":"test","credentials":[{"accessKey":"P7SIGV4TEST","secretKey":"p7-sigv4-test-secret-only"}],"actions":["Admin","Read","Write","List","Tagging"]}]}'\'' > /tmp/s3.json
             exec weed server -s3 -s3.port=8333 -s3.config=/tmp/s3.json -dir=/data'
-          for attempt in $(seq 1 60); do
+          for ((attempt = 0; attempt < 60; attempt++)); do
             if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18333/ || true)" = 403 ]; then exit 0; fi
             sleep 1
           done

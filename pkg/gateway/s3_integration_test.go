@@ -68,7 +68,7 @@ allow if {
   valid_source
 }
 permitted_path if startswith(input.http.path, %q)
-permitted_path if { input.http.path == %q; input.http.method in {"PUT", "DELETE"} }
+permitted_path if { input.http.path == %q; input.http.method in {"GET", "PUT", "DELETE"} }
 valid_source if not input.http.headers["x-amz-copy-source"]
 valid_source if {
   values := input.http.headers["x-amz-copy-source"]
@@ -107,6 +107,12 @@ valid_source if {
 	h.install(t, "s3-http-explicit", engine, manager(), up)
 	request("PUT", "/"+bucket, nil, nil, 200)
 	t.Cleanup(func() { request("DELETE", "/"+bucket, nil, nil, 204) })
+	lifecycle := `<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><ID>incomplete-snapshots</ID><Status>Enabled</Status><Filter><Prefix>sessions/</Prefix></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>`
+	request("PUT", "/"+bucket+"?lifecycle", strings.NewReader(lifecycle), http.Header{"Content-Type": {"application/xml"}}, 200)
+	configuration, _ := request("GET", "/"+bucket+"?lifecycle", nil, nil, 200)
+	if !bytes.Contains(configuration, []byte("<DaysAfterInitiation>1</DaysAfterInitiation>")) {
+		t.Fatalf("real S3 did not retain incomplete multipart expiration: %s", configuration)
+	}
 	key := prefix + "workspace space+$%25.tar.zst"
 	payload := []byte("snapshot through PDP, with an unsigned streamed body")
 	// io.NopCloser deliberately has no GetBody, like a multipart upload stream.
