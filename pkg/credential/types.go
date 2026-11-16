@@ -17,9 +17,10 @@ import (
 type Kind string
 
 const (
-	Bearer Kind = "bearer"
-	Basic  Kind = "basic"
-	Header Kind = "header"
+	Bearer   Kind = "bearer"
+	Basic    Kind = "basic"
+	Header   Kind = "header"
+	AWSSigV4 Kind = "aws_sigv4"
 )
 
 // Result deliberately keeps credential material out of formatting and JSON.
@@ -30,6 +31,9 @@ type Result struct {
 	token     string
 	username  string
 	header    string
+	accessKey string
+	region    string
+	service   string
 }
 
 func (r Result) String() string                { return "credential.Result([redacted])" }
@@ -71,6 +75,8 @@ func (r Result) patterns() []string {
 	switch r.Kind {
 	case Bearer:
 		patterns = append(patterns, "Bearer "+r.token)
+	case AWSSigV4:
+		patterns = append(patterns, r.accessKey)
 	case Basic:
 		encoded := base64.StdEncoding.EncodeToString([]byte(r.username + ":" + r.token))
 		patterns = append(patterns, encoded, "Basic "+encoded)

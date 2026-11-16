@@ -8,7 +8,7 @@ import (
 	"go.starlark.net/starlark"
 )
 
-var builtinNames = map[string]bool{"secret": true, "parameter": true, "static": true, "oauth_client_credentials": true, "oauth_refresh": true, "linear_client_credentials": true, "linear_refresh": true, "github_installation": true, "jwt_rs256": true}
+var builtinNames = map[string]bool{"secret": true, "parameter": true, "static": true, "aws_sigv4": true, "oauth_client_credentials": true, "oauth_refresh": true, "linear_client_credentials": true, "linear_refresh": true, "github_installation": true, "jwt_rs256": true}
 
 type secretHandle struct {
 	name      string
@@ -87,7 +87,7 @@ func (m *Manager) execute(ctx context.Context, r Request) (Result, error) {
 		return Result{}, failure(CodeInvalid)
 	}
 	out := result.result
-	if !validValue(out.token, m.cfg.Limits.MaxOutputBytes) || len(out.token)+len(out.username)+len(out.header) > m.cfg.Limits.MaxOutputBytes || !time.Now().Add(m.cfg.Limits.ExpiryMargin).Before(out.ExpiresAt) {
+	if !validValue(out.token, m.cfg.Limits.MaxOutputBytes) || len(out.token)+len(out.username)+len(out.header)+len(out.accessKey) > m.cfg.Limits.MaxOutputBytes || !time.Now().Add(m.cfg.Limits.ExpiryMargin).Before(out.ExpiresAt) {
 		return Result{}, failure(CodeUnavailable)
 	}
 	return out, nil
@@ -105,7 +105,7 @@ func (e *execution) sanitize(_ error, t *starlark.Thread) error {
 	return failure(CodeUnavailable)
 }
 func (e *execution) builtins() starlark.StringDict {
-	funcs := map[string]func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error){"secret": e.secret, "parameter": e.parameter, "static": e.static, "oauth_client_credentials": e.oauth, "oauth_refresh": e.oauth, "linear_client_credentials": e.oauth, "linear_refresh": e.oauth, "github_installation": e.github, "jwt_rs256": e.jwt}
+	funcs := map[string]func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error){"secret": e.secret, "parameter": e.parameter, "static": e.static, "aws_sigv4": e.awsSigV4, "oauth_client_credentials": e.oauth, "oauth_refresh": e.oauth, "linear_client_credentials": e.oauth, "linear_refresh": e.oauth, "github_installation": e.github, "jwt_rs256": e.jwt}
 	out := make(starlark.StringDict, len(funcs))
 	for name, f := range funcs {
 		out[name] = starlark.NewBuiltin(name, func(t *starlark.Thread, b *starlark.Builtin, a starlark.Tuple, k []starlark.Tuple) (starlark.Value, error) {

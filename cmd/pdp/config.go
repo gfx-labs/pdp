@@ -67,7 +67,7 @@ func validateTransport(c config.Config) error {
 func snapshot(l *config.Loaded, a auth.Authenticator) (*gateway.Snapshot, error) {
 	upstreams := make([]gateway.Upstream, 0, len(l.Config.Upstreams))
 	for _, u := range l.Config.Upstreams {
-		upstreams = append(upstreams, gateway.Upstream{Host: u.Host, Port: u.Port, Tunnel: u.TLS == "tunnel", Bindings: u.Bindings, Scopes: u.Scopes,
+		upstreams = append(upstreams, gateway.Upstream{Host: u.Host, Port: u.Port, AllowHTTP: u.AllowHTTP, Tunnel: u.TLS == "tunnel", Bindings: u.Bindings, Scopes: u.Scopes, PolicyHeaders: u.PolicyHeaders,
 			Plugin: u.Schema, REST: l.REST[u.Schema], GraphQL: l.GraphQL[u.Schema], GraphQLPath: u.GraphQLPath, TokenPaths: u.TokenPaths})
 	}
 	return gateway.NewSnapshot(gateway.SnapshotConfig{Version: l.Config.Revision, Authenticator: a, Upstreams: upstreams, Policy: l.Policy, Credentials: l.Credentials})

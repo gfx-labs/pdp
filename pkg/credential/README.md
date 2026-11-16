@@ -28,13 +28,13 @@ manager, err := credential.New(credential.Config{
 })
 ```
 
-Check `err`, call `Close` when retiring the manager, and use `Validate(Request)` while building the gateway snapshot. `New` compiles source without contacting providers or reading secrets. Call `Get(ctx, Request{Provider, Binding, Scopes})` only after authorization. Before `Result.Apply(upstreamHeaders)`, delete the caller's value for `Result.HeaderName()` (`Authorization`, or the custom header of a `header` result) so a caller-supplied value or placeholder never reaches the provider. Call `Apply` only for the authorized destination. On upstream authentication failure, call `Invalidate` without automatically replaying the request.
+Check `err`, call `Close` when retiring the manager, and use `Validate(Request)` while building the gateway snapshot. `New` compiles source without contacting providers or reading secrets. Call `Get(ctx, Request{Provider, Binding, Scopes})` only after authorization. Use `Result.ApplyRequest(upstreamRequest)` for request signing or header credentials. Before applying, delete the caller's value for `Result.HeaderName()` (`Authorization`, or the custom header of a `header` result) so a caller-supplied value or placeholder never reaches the provider. Call `Apply` only for the authorized destination. On upstream authentication failure, call `Invalidate` without automatically replaying the request.
 
 Check `Result.ContainsSecret` on bounded response bodies and forwarded headers before releasing them. It covers raw credential material, Basic encoding, and JSON string escapes, not arbitrary encodings or a malicious upstream covert channel. For a response relayed as it arrives, use `Result.Scanner()`. `Scanner.Next(chunk)` returns the bytes that are safe to send and reports a match. It holds back only a trailing run that could be the start of the credential, so a credential split across reads is still caught and no prefix of it is released. Call `Scanner.Flush()` when the response ends to release the held bytes. The scanner matches the raw token, `Bearer <token>` and the Basic encodings only. It does not catch JSON-escaped or compressed forms, so a caller that streams must refuse compressed responses itself. Error bodies should remain generic.
 
 `Manager.Binding(name)` returns a `Binding` with the non-secret routing facts of one configured binding: `Provider`, `Placeholder` and `Headers`. The gateway uses it to choose among several bindings on one destination and to set fixed headers. It never returns secret material.
 
-`Result` and `Manager` formatting is redacted. Results serialize only kind and expiry. `Apply` is deliberately the only operation that exports an authentication value. Never log applied headers. Reload with a newly validated manager and immutable upstream bindings. The gateway owns the retiring manager's lifecycle.
+`Result` and `Manager` formatting is redacted. Results serialize only kind and expiry. `Apply` and `ApplyRequest` are the only operations that export authentication values. Never log applied headers. Reload with a newly validated manager and immutable upstream bindings. The gateway owns the retiring manager's lifecycle.
 
 ## Placeholders and fixed headers
 
@@ -69,6 +69,7 @@ An adapter defines `acquire(request)` and returns a native credential result. `r
 | `secret(name)` | Opaque handle for one named binding secret. No string/byte conversion. |
 | `parameter(name)` | Administrator parameter string. Never put secrets here. |
 | `static(handle, kind="bearer", username="", header_name="", ttl_seconds=300)` | Typed bearer, Basic or custom-header result. Mounted file is reread on acquisition. |
+| `aws_sigv4(access_key, secret_key, region, service="s3", ttl_seconds=300)` | Opaque secret handles for both keys. Signs the final request using AWS Signature Version 4. |
 | `jwt_rs256(key, issuer)` | Opaque RS256 JWT, backdated 60 seconds, expiry nine minutes ahead. RSA keys 2048 through 8192 bits only. |
 | `github_installation(endpoint, key)` | Signs the configured app JWT and exchanges it with mandatory fixed repository IDs and permissions. |
 | `oauth_client_credentials(endpoint, client_id, client_secret, authentication="body")` | Shared OAuth grant with space-separated authorized scopes. Supports `authentication="basic"`. |
@@ -84,7 +85,17 @@ Secret files must be regular, bounded files without group/world write permission
 
 The executable adapters are embedded from `adapters/*.star`, rather than copied strings in tests.
 
-### GitHub App
+### AWS Signature Version 4
+
+An adapter returns `aws_sigv4(secret("access_key"), secret("secret_key"), region=parameter("region"))`. Both keys stay opaque in Starlark and are reread on acquisition. Apply the result with `ApplyRequest`, after authorization and after finalizing the URL and headers. An empty body uses the empty SHA256 hash. A replayable `GetBody` is hashed without consuming the request body. Non-replayable bodies, including multipart PUT streams, use `UNSIGNED-PAYLOAD` without buffering. Caller signatures, dates, payload hashes and security tokens are replaced. Presigned query authentication and signed `aws-chunked` bodies are rejected, not silently relayed with the wrong key. Temporary AWS session credentials are not supported.
+
+Plain HTTP credential injection stays off by default. An exact upstream host and port can set `allow_http: true`, but Rego must independently allow that scheme and its resolved private addresses. The setting grants no network permission. Do not enable it for public upstreams.
+
+S3 CopyObject and UploadPartCopy read a source named in `x-amz-copy-source`. Configure `policy_headers: [x-amz-copy-source]` on the upstream and require Rego to authorize both source and destination paths. These selected headers appear as lowercase keys with arrays of values at `input.http.headers`. Only select non-secret headers. Authorization, Cookie and hop-by-hop credential headers cannot be selected. Do not authorize bucket-wide bulk delete or listing when granting only one object's prefix.
+
+The AWS published GET, PUT, lifecycle and list vectors are checked in `TestAWSPublishedSigV4Vectors`. `TestS3SigningIntegration` runs through the real gateway against an authenticated S3 server with streaming PUT, GET, HEAD, copy, multipart complete and abort. Set `PDP_TEST_S3_ENDPOINT`, `PDP_TEST_S3_ACCESS_KEY` and `PDP_TEST_S3_SECRET_KEY` for a disposable server. CI runs it with SeaweedFS 4.31 and also proves that anonymous and incorrect signatures are refused.
+
+## GitHub App
 
 Use `adapters.GitHubApp`. Configure endpoint alias `token` to the complete installation access-token endpoint, such as `https://api.github.com/app/installations/123/access_tokens`. Configure `Secrets.private_key` as a mounted RSA PEM, and `GitHub` with app ID, one to 500 repository IDs, and an explicit permission map. Empty restrictions are rejected. The helper always sends both restrictions, validates returned authority, and permits GitHub's implicit read-only metadata permission. It does not list installations or repositories. Scope requests must equal the fixed binding scope set.
 

@@ -105,15 +105,19 @@ type Schema struct {
 type Upstream struct {
 	Host string `json:"host"`
 	Port int    `json:"port,omitempty"`
+	// AllowHTTP permits credentials on plaintext for this exact host and port.
+	// Rego must still authorize the scheme and resolved private addresses.
+	AllowHTTP bool `json:"allow_http,omitempty"`
 	// TLS is "intercept" (default) or "tunnel".
 	TLS string `json:"tls,omitempty"`
 	// Binding is shorthand for one entry in Bindings.
-	Binding     string   `json:"binding,omitempty"`
-	Bindings    []string `json:"bindings,omitempty"`
-	Schema      string   `json:"schema,omitempty"`
-	GraphQLPath string   `json:"graphql_path,omitempty"`
-	TokenPaths  []string `json:"token_paths,omitempty"`
-	Scopes      []string `json:"scopes,omitempty"`
+	Binding       string   `json:"binding,omitempty"`
+	Bindings      []string `json:"bindings,omitempty"`
+	Schema        string   `json:"schema,omitempty"`
+	GraphQLPath   string   `json:"graphql_path,omitempty"`
+	TokenPaths    []string `json:"token_paths,omitempty"`
+	Scopes        []string `json:"scopes,omitempty"`
+	PolicyHeaders []string `json:"policy_headers,omitempty"`
 }
 
 // Loaded owns a complete prospective snapshot, including its credential cache.

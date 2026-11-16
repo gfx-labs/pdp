@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,9 @@ import (
 type Upstream struct {
 	Host string
 	Port int // 0 means 443
+	// AllowHTTP opts this exact destination into plaintext credential injection.
+	// It does not authorize requests or bypass the Rego address checks.
+	AllowHTTP bool
 	// Tunnel relays CONNECT bytes without terminating TLS. Policy then sees
 	// only host and port, and no credential can be injected.
 	Tunnel bool
@@ -35,6 +39,8 @@ type Upstream struct {
 	// the caller's placeholder selects the candidate that policy must allow.
 	Bindings []string
 	Scopes   []string
+	// PolicyHeaders names non-secret headers whose values Rego must inspect.
+	PolicyHeaders []string
 	// Plugin names the pinned schema in policy input and audit records.
 	Plugin  string
 	REST    *schema.RESTSchema
@@ -106,7 +112,7 @@ func NewSnapshot(c SnapshotConfig) (*Snapshot, error) {
 		if u.REST != nil && u.GraphQL != nil {
 			return nil, errors.New("upstream cannot pin both a REST and a GraphQL schema")
 		}
-		if u.Tunnel && (len(u.Bindings) != 0 || entry.strict() || len(u.TokenPaths) != 0) {
+		if u.Tunnel && (u.AllowHTTP || len(u.Bindings) != 0 || entry.strict() || len(u.TokenPaths) != 0) {
 			return nil, errors.New("a tunnel upstream cannot have a binding, schema or token path")
 		}
 		if entry.strict() {
@@ -128,6 +134,12 @@ func NewSnapshot(c SnapshotConfig) (*Snapshot, error) {
 			return nil, errors.New("plugin and GraphQL path require a schema")
 		}
 		entry.Scopes = append([]string(nil), u.Scopes...)
+		entry.PolicyHeaders = append([]string(nil), u.PolicyHeaders...)
+		for _, name := range entry.PolicyHeaders {
+			if !credential.ValidHeader(name) || strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Cookie") || strings.EqualFold(name, "Set-Cookie") {
+				return nil, errors.New("policy headers must name non-secret request headers")
+			}
+		}
 		placeholders := map[string]bool{}
 		for _, name := range u.Bindings {
 			b, ok := c.Credentials.Binding(name)
