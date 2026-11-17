@@ -802,3 +802,49 @@ func TestLinearClientCredentialsExplicitActorAndScopes(t *testing.T) {
 		t.Fatal("scope-changing Linear issuance reached provider")
 	}
 }
+
+func TestGitHubAppBasicExchange(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := secretFile(t, t.TempDir(), "key.pem", string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})))
+	script := "def acquire(request):\n    return github_installation(\"token\", secret(\"private_key\"), kind=\"basic\", username=\"x-access-token\")\n"
+	c, _ := tlsConfig(t, script, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"token": "fixture-installation", "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339), "permissions": map[string]string{"contents": "read", "metadata": "read"}, "repositories": []map[string]int{{"id": 42}}})
+	})
+	b := c.Bindings["binding"]
+	b.Secrets = map[string]credential.SecretSource{"private_key": {File: keyPath}}
+	b.GitHub = &credential.GitHubConfig{AppID: "123", RepositoryIDs: []int64{42}, Permissions: map[string]string{"contents": "read"}}
+	c.Bindings["binding"] = b
+	m := manager(t, c)
+	result, err := m.Get(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:fixture-installation")); authorization(t, result) != want {
+		t.Fatal("wrong installation token injection")
+	}
+	if !result.ContainsSecret([]byte("fixture-installation")) {
+		t.Fatal("the token is not treated as a secret")
+	}
+}
+
+func TestGitHubAppRejectsAnUnknownKind(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := secretFile(t, t.TempDir(), "key.pem", string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})))
+	script := "def acquire(request):\n    return github_installation(\"token\", secret(\"private_key\"), kind=\"header\")\n"
+	c, _ := tlsConfig(t, script, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("an invalid kind must fail before the exchange")
+	})
+	b := c.Bindings["binding"]
+	b.Secrets = map[string]credential.SecretSource{"private_key": {File: keyPath}}
+	b.GitHub = &credential.GitHubConfig{AppID: "123", RepositoryIDs: []int64{42}, Permissions: map[string]string{"contents": "read"}}
+	c.Bindings["binding"] = b
+	if _, err := manager(t, c).Get(context.Background(), request()); err == nil {
+		t.Fatal("an unknown kind must be refused")
+	}
+}
