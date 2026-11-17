@@ -73,8 +73,20 @@ func (e *execution) jwt(_ *starlark.Thread, b *starlark.Builtin, args starlark.T
 func (e *execution) github(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kw []starlark.Tuple) (starlark.Value, error) {
 	var endpoint string
 	var value starlark.Value
-	if err := starlark.UnpackArgs(b.Name(), args, kw, "endpoint", &endpoint, "key", &value); err != nil {
+	kind, username := "bearer", ""
+	if err := starlark.UnpackArgs(b.Name(), args, kw, "endpoint", &endpoint, "key", &value, "kind?", &kind, "username?", &username); err != nil {
 		return nil, err
+	}
+	// git over HTTPS on github.com accepts the token only as Basic credentials.
+	switch Kind(kind) {
+	case Bearer:
+		username = ""
+	case Basic:
+		if !validValue(username, 1024) {
+			return nil, failure(CodeInvalid)
+		}
+	default:
+		return nil, failure(CodeInvalid)
 	}
 	handle, ok := value.(*secretHandle)
 	if !ok || e.binding.GitHub == nil || !scopesEqual(e.request.Scopes, e.binding.Scopes) {
@@ -142,5 +154,5 @@ func (e *execution) github(_ *starlark.Thread, b *starlark.Builtin, args starlar
 			}
 		}
 	}
-	return &resultValue{owner: e, result: Result{Kind: Bearer, token: response.Token, ExpiresAt: response.ExpiresAt}}, nil
+	return &resultValue{owner: e, result: Result{Kind: Kind(kind), username: username, token: response.Token, ExpiresAt: response.ExpiresAt}}, nil
 }
