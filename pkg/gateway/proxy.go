@@ -108,7 +108,18 @@ func (x *exchange) request(identity auth.Identity, dest destination) {
 	if chosen != nil {
 		input.Binding = chosen.name
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), limit)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	var handshakeTimer *time.Timer
+	if input.Protocol == policy.ProtocolWebSocket {
+		// Only the handshake is deadline-bound. The upgraded stream has no lifetime limit.
+		limit = g.opts.RequestTimeout
+		ctx, cancel = context.WithCancel(r.Context())
+		handshakeTimer = time.AfterFunc(time.Until(x.started.Add(limit)), cancel)
+		defer handshakeTimer.Stop()
+	} else {
+		ctx, cancel = context.WithTimeout(r.Context(), limit)
+	}
 	defer cancel()
 	controller := http.NewResponseController(x.w)
 	_ = controller.SetReadDeadline(x.started.Add(limit))
@@ -207,6 +218,10 @@ func (x *exchange) request(identity auth.Identity, dest destination) {
 	case up.strict():
 		x.respondBuffered(response, lease)
 	case response.StatusCode == http.StatusSwitchingProtocols:
+		if handshakeTimer != nil && !handshakeTimer.Stop() {
+			x.fail(http.StatusBadGateway, "upstream_unavailable")
+			return
+		}
 		x.respondUpgrade(response, input.Protocol == policy.ProtocolWebSocket, chosen != nil, lease)
 	default:
 		x.respondStream(response, chosen != nil, lease)
@@ -366,7 +381,7 @@ func (x *exchange) respondUpgrade(response *http.Response, requested, credential
 		return
 	}
 	x.status, x.outcome = http.StatusSwitchingProtocols, "upgraded"
-	x.event.BytesSent, x.event.BytesReceived = relay(&bufferedConn{Conn: conn, reader: buffered.Reader}, backend, x.started.Add(x.g.opts.StreamTimeout))
+	x.event.BytesSent, x.event.BytesReceived = relay(&bufferedConn{Conn: conn, reader: buffered.Reader}, backend, time.Time{})
 }
 
 // relay copies both ways until either side ends or the deadline passes.
@@ -375,8 +390,10 @@ func relay(client net.Conn, backend io.ReadWriteCloser, deadline time.Time) (sen
 	if c, ok := backend.(net.Conn); ok {
 		_ = c.SetDeadline(deadline)
 	}
-	timer := time.AfterFunc(time.Until(deadline), func() { client.Close(); backend.Close() })
-	defer timer.Stop()
+	if !deadline.IsZero() {
+		timer := time.AfterFunc(time.Until(deadline), func() { client.Close(); backend.Close() })
+		defer timer.Stop()
+	}
 	done := make(chan struct{})
 	go func() {
 		received, _ = io.Copy(client, backend)

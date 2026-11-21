@@ -43,7 +43,7 @@ Every connecting UID, every workload the bundle verifies and every address that 
 
 A `token_paths` request stops after step 6: it is answered locally with the placeholder and never sent upstream. A `CONNECT` to a tunnel upstream is authorized once with `protocol: "tunnel"` and relayed unread. Any other `CONNECT` is intercepted, and each request inside goes through these steps.
 
-Redirects are never followed. A request with a body is never sent twice. A bodiless read may be resent once when a reused connection fails, see [configuration](configuration.md#request-forms-and-handling). Concurrency and all deadlines are bounded. Bodies are bounded on schema-backed upstreams. Streams are bounded by `stream_timeout`.
+Redirects are never followed. A request with a body is never sent twice. A bodiless read may be resent once when a reused connection fails, see [configuration](configuration.md#request-forms-and-handling). Concurrency is bounded. Bodies are bounded on schema-backed upstreams. HTTP streams and opaque tunnels are bounded by `stream_timeout`. A WebSocket handshake is bounded by `request_timeout`, but an upgraded connection lasts until either peer closes.
 
 Out of scope: a credential-return endpoint, response-field filtering, HTTP/2, DNS over TCP, a browser consent UI, a multi-tenant admin platform, request-path schema introspection.
 
@@ -108,7 +108,7 @@ The optional DNS server answers only upstream hosts and `dns.intercept` patterns
 
 ## Reload and revocation
 
-A reload builds a complete new snapshot (policy, schemas, upstreams, bindings, credential manager) and publishes it atomically. A request uses exactly one snapshot. After `reload_applied` for a revision, every request that begins afterward uses it, including new requests inside an open intercepted `CONNECT`. A request already running keeps its snapshot. For a relayed stream, WebSocket or tunnel that lasts until it ends or `stream_timeout` passes. There is no positive authorization cache, so a warm provider token cannot outlive a policy change for new requests.
+A reload builds a complete new snapshot (policy, schemas, upstreams, bindings, credential manager) and publishes it atomically. A request uses exactly one snapshot. After `reload_applied` for a revision, every request that begins afterward uses it, including new requests inside an open intercepted `CONNECT`. A request already running keeps its snapshot. For a relayed HTTP stream or tunnel that lasts until it ends or `stream_timeout` passes. An upgraded WebSocket keeps its snapshot until either peer closes. There is no positive authorization cache, so a warm provider token cannot outlive a policy change for new requests.
 
 This is a local snapshot boundary. It does not revoke issued provider tokens or undo in-flight provider actions, and it gives no multi-replica consistency. Revocation across replicas needs an acknowledgement from each, or stale replicas must stop serving. Listener, interception, DNS, limit and CA settings need a restart, and so does a change to the set of steered DNS names.
 

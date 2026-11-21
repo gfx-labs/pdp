@@ -181,7 +181,7 @@ The `subscription` pack shows two accounts on one host.
 
 ## WebSocket and streaming
 
-A WebSocket upgrade request is authorized with `protocol: "websocket"` and gets the credential like any other request. When the upstream answers `101`, PDP relays bytes both ways without inspecting frames. Streamed responses are relayed as they arrive and flushed after each read. Both are bounded by `limits.stream_timeout` (default 10 minutes) and the concurrency limit, and the audit event records `bytes_sent` and `bytes_received`. There is no separate idle timeout for an open stream.
+A WebSocket upgrade request is authorized with `protocol: "websocket"` and gets the credential like any other request. When the upstream answers `101`, PDP relays bytes both ways without inspecting frames. Streamed responses are relayed as they arrive and flushed after each read. Both hold a concurrency slot, and the audit event records `bytes_sent` and `bytes_received` when the connection ends. Streamed HTTP responses are bounded by `limits.stream_timeout` (default 10 minutes). A WebSocket handshake is bounded by `limits.request_timeout`. After `101`, the connection lasts until either peer closes, without a duration or idle timeout. Relay copies bytes with fixed-size buffers, without buffering or interpreting whole frames.
 
 Buffered responses on schema-backed upstreams are scanned whole for the injected credential, including Basic and JSON-escaped forms. Streamed responses on a credentialed destination are scanned for the same raw byte patterns as they pass, holding back only a trailing run that could be the start of a match. On a match the connection is cut before the credential is written, and the audit event records `credential_reflected`. JSON-escaped forms are not caught on streams. PDP sends `Accept-Encoding: identity` and refuses a compressed response when a credential was injected, because a scan of compressed bytes would find nothing. Response headers that carry the credential are also refused. WebSocket frames are not scanned, so an upstream that echoes its credential inside a WebSocket would not be caught.
 
@@ -235,7 +235,7 @@ Outside Kubernetes the same two files come from any CA tooling.
 - The proposal had adapter results set several headers. In the code an adapter result still sets one header. Extra fixed headers, such as an account ID, come from the binding's `headers`.
 - DNS forwarding needs an explicit `dns.resolver` address. `unlisted: "forward"` without a resolver is rejected.
 - The interception CA is reloaded on file change only, at most once a minute. A failed reload keeps the loaded CA and is logged once as `interception_ca_reload_failed` with its cause. `SIGHUP` does not reread it, and a change to the `interception` paths needs a restart.
-- Streams and WebSockets have one maximum duration, `limits.stream_timeout`. There is no separate idle timeout.
+- HTTP streams have one maximum duration, `limits.stream_timeout`. Upgraded WebSockets have no duration or idle timeout. A policy reload or certificate expiry does not terminate an already authorized WebSocket.
 - `pdp.authz/v1` input is not accepted. All packs moved to `pdp.authz/v2` in this change, which settles the proposal's second open question.
 
 ## What has not been established
