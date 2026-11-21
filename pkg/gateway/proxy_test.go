@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -23,6 +24,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
+	"golang.org/x/net/websocket"
 
 	"github.com/gfx-labs/pdp/internal/spiffetest"
 	"github.com/gfx-labs/pdp/pkg/auth"
@@ -229,6 +231,123 @@ allow if {
 	events := h.waitAudit(t, 2)
 	if len(events) != 2 || events[0].Outcome != "upgraded" || events[0].BytesSent != int64(len(echoed)) || events[0].BytesReceived != int64(len(echoed)) || events[1].Outcome != "forbidden" {
 		t.Fatalf("upgrade audit: %+v", events)
+	}
+}
+
+func TestWebSocketConnectRelay(t *testing.T) {
+	authority, roots := testAuthority(t)
+	var calls atomic.Int64
+	server := websocket.Server{
+		Handshake: func(_ *websocket.Config, r *http.Request) error {
+			calls.Add(1)
+			if r.Header.Get("Authorization") != "Bearer "+testToken || r.Header.Get("Cookie") != "" {
+				return fmt.Errorf("handshake credential was not replaced")
+			}
+			return nil
+		},
+		Handler: func(conn *websocket.Conn) {
+			if err := websocket.Message.Send(conn, "origin greeting"); err != nil {
+				return
+			}
+			for {
+				var message []byte
+				if err := websocket.Message.Receive(conn, &message); err != nil || string(message) == "close-origin" {
+					return
+				}
+				if err := websocket.Message.Send(conn, message); err != nil {
+					return
+				}
+			}
+		},
+	}
+	const streamTimeout = 700 * time.Millisecond
+	h := newHarness(t, server.ServeHTTP, true, Options{Interception: authority, RequestTimeout: 500 * time.Millisecond, StreamTimeout: streamTimeout})
+	h.install(t, "websocket-connect", engineFor(t, "websocket-connect", fmt.Sprintf(`package pdp.authz
+import rego.v1
+default allow := false
+allow if {
+	%s
+	input.protocol == "websocket"
+	input.destination.host == "example.com"
+	input.binding == "installation"
+	input.http.path == "/socket"
+}
+`, callerRule(true)), nil), managerFor(t, testToken), h.upstream())
+	connect := func(host string) *tls.Conn {
+		t.Helper()
+		conn, err := net.Dial("unix", h.socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		target := net.JoinHostPort(host, strconv.Itoa(h.port))
+		if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+		if err != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("CONNECT: response=%v error=%v", response, err)
+		}
+		secured := tls.Client(conn, &tls.Config{RootCAs: roots, ServerName: host})
+		if err := secured.Handshake(); err != nil {
+			t.Fatal(err)
+		}
+		return secured
+	}
+	config, err := websocket.NewConfig("wss://"+net.JoinHostPort(testHost, strconv.Itoa(h.port))+"/socket", h.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Header.Set("Authorization", "Bearer pdp-placeholder")
+	config.Header.Set("Cookie", "caller-cookie")
+	conn, err := websocket.NewClient(config, connect(testHost))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	var greeting string
+	if err := websocket.Message.Receive(conn, &greeting); err != nil || greeting != "origin greeting" {
+		t.Fatalf("unsolicited origin message: %q, %v", greeting, err)
+	}
+	// Outlive both configured timeouts, then relay a payload larger than a copy buffer.
+	<-time.After(streamTimeout + 100*time.Millisecond)
+	payload := bytes.Repeat([]byte("binary\x00\xff"+testToken), 4096)
+	if err := websocket.Message.Send(conn, payload); err != nil {
+		t.Fatal(err)
+	}
+	var echoed []byte
+	if err := websocket.Message.Receive(conn, &echoed); err != nil || !bytes.Equal(echoed, payload) {
+		t.Fatalf("WebSocket echo after timeouts: bytes=%d error=%v", len(echoed), err)
+	}
+	if err := websocket.Message.Send(conn, []byte("close-origin")); err != nil {
+		t.Fatal(err)
+	}
+	if err := websocket.Message.Receive(conn, &echoed); err == nil || os.IsTimeout(err) {
+		t.Fatalf("origin close did not terminate relay: %v", err)
+	}
+	conn.Close()
+	denied := connect("denied.example")
+	if _, err := fmt.Fprintf(denied, "GET /socket HTTP/1.1\r\nHost: denied.example:%d\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", h.port); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(denied), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	denied.Close()
+	if response.StatusCode != http.StatusForbidden || calls.Load() != 1 {
+		t.Fatalf("denied host reached origin: status=%d calls=%d", response.StatusCode, calls.Load())
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, host := range h.lookups {
+		if host == "denied.example" {
+			t.Fatal("denied host was resolved")
+		}
 	}
 }
 

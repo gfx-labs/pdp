@@ -224,7 +224,7 @@ type Options struct {
 	// RequestTimeout bounds a schema-backed exchange and the wait for any
 	// upstream's response headers.
 	RequestTimeout time.Duration
-	// StreamTimeout bounds a relayed response, WebSocket or tunnel.
+	// StreamTimeout bounds a relayed HTTP response or opaque tunnel, not a WebSocket.
 	StreamTimeout time.Duration
 	// DisableUpstreamReuse opens a new upstream connection for every request.
 	// With reuse, a request may travel on a connection dialed for an earlier
@@ -379,6 +379,7 @@ func (g *Gateway) lookup(ctx context.Context, host string) ([]netip.Addr, error)
 // Reload publishes one complete view. In-flight requests retain their old view.
 // Revocation applies when a request loads the pointer, not midway through a write.
 // A relayed stream or tunnel keeps its old view until it ends or StreamTimeout.
+// An upgraded WebSocket keeps its old view until either peer closes.
 func (g *Gateway) Reload(s *Snapshot) error {
 	if s == nil {
 		return errors.New("gateway snapshot is required")
